@@ -11,7 +11,7 @@
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@octokit/rest": "^20.0.2",
-    "@whiskeysockets/baileys": "npm:baileys@6.7.20",
+    "@whiskeysockets/baileys": "^7.0.0-rc.6",
     "axios": "^1.2.5",
     "bcrypt": "^5.1.1",
     "canvas": "latest",
@@ -43,6 +43,7 @@
     "wa-sticker-formatter": "^4.4.4",
     "yt-search": "^2.12.1"
   },
+
   "devDependencies": {
     "nodemon": "^3.0.1"
   },
