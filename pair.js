@@ -4,16 +4,12 @@ const path = require('path');
 const { exec } = require('child_process');
 const router = express.Router();
 const pino = require('pino');
-const cheerio = require('cheerio');
 const moment = require('moment-timezone');
-const Jimp = require('jimp');
-const crypto = require('crypto');
 const axios = require('axios');
-const FormData = require("form-data");
-const os = require('os'); 
 const { sms, downloadMediaMessage } = require("./msg");
 const bcrypt = require('bcrypt');
-const { MongoClient, ObjectId } = require('mongodb');
+const { MongoClient } = require('mongodb');
+require('dotenv').config();
 
 const {
     default: makeWASocket,
@@ -22,43 +18,54 @@ const {
     getContentType,
     makeCacheableSignalKeyStore,
     Browsers,
-    jidNormalizedUser,
-    downloadContentFromMessage,
-    proto,
-    prepareWAMessageMedia,
-    generateWAMessageFromContent,
-    S_WHATSAPP_NET
+    jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 
 // Import MEGA storage
 const MegaStorage = require('./megaStorage');
 
 const config = {
-    AUTO_VIEW_STATUS: 'true',
-    AUTO_LIKE_STATUS: 'true',
-    AUTO_RECORDING: 'true',
-    AUTO_LIKE_EMOJI: ['🩵', '🧘', '😀', '👍', '🤭', '😂', '🥹', '🥰', '😍', '🤩', '😎', '🥳', '😜', '🤗', '🫠', '😢', '😡', '🤯', '🥶', '😴', '🙄', '🤔', '🐶', '🐱', '🐢', '🦋', '🐙', '🦄', '🦁', '🐝', '🌸', '🍀', '🌈', '⭐', '🌙', '🍁', '🌵', '🍕', '🍦', '🍩', '☕', '🧋', '🥑', '🍇', '🍔', '🌮', '🍜', '⚽', '🎮', '🎨', '✈️', '🚀', '💡', '📚', '🎸', '🛼', '🎯', '💎', '🧩', '🔭', '❤️', '🔥', '💫', '✨', '💯', '✅', '❌', '🙏'],
+    AUTO_VIEW_STATUS: 'false',
+    AUTO_LIKE_STATUS: 'false',
+    AUTO_RECORDING: 'false',
     PREFIX: '.',
     MODE: 'public',
     MAX_RETRIES: 3,
     ADMIN_LIST_PATH: './admin.json',
     RCD_IMAGE_PATH: 'https://i.ibb.co/chFk6yQ7/vision-v.jpg',
-    NEWSLETTER_JID: '120363299029326322@newsletter',
-    NEWSLETTER_MESSAGE_ID: '428',
-    OTP_EXPIRY: 300000,
-    version: '1.0.0',
+    version: '2.0.0',
     OWNER_NUMBER: '254740007567',
     BOT_FOOTER: 'ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ',
-    CHANNEL_LINK: 'https://whatsapp.com/channel/0029VbB3YxTDJ6H15SKoBv3S',
-    MEGA_EMAIL: process.env.MEGA_EMAIL || 'tohidkhan9050482152@gmail.com',
-    MEGA_PASSWORD: process.env.MEGA_PASSWORD || 'Rvpy.B.6YeZn7CR',
-    // PayHero Configuration
-    PAYHERO_BASE_URL: process.env.PAYHERO_BASE_URL || 'https://api.payhero.com',
+    MEGA_EMAIL: process.env.MEGA_EMAIL,
+    MEGA_PASSWORD: process.env.MEGA_PASSWORD,
+    // PayHero Configuration from .env
+    PAYHERO_BASE_URL: process.env.PAYHERO_BASE_URL,
     PAYHERO_AUTH_TOKEN: process.env.PAYHERO_AUTH_TOKEN,
     PAYHERO_CHANNEL_ID: process.env.PAYHERO_CHANNEL_ID,
     PAYHERO_PROVIDER: process.env.PAYHERO_PROVIDER || 'M-PESA',
-    PAYHERO_CALLBACK_URL: process.env.PAYHERO_CALLBACK_URL || 'https://your-domain.com/api/payhero/callback'
+    PAYHERO_BUSINESS_NUMBER: process.env.PAYHERO_BUSINESS_NUMBER,
+    PAYHERO_CALLBACK_URL: process.env.PAYHERO_CALLBACK_URL
 };
+
+// Validate required environment variables
+function validateConfig() {
+    const required = [
+        'PAYHERO_BASE_URL',
+        'PAYHERO_AUTH_TOKEN', 
+        'PAYHERO_CHANNEL_ID',
+        'PAYHERO_BUSINESS_NUMBER',
+        'PAYHERO_CALLBACK_URL'
+    ];
+    
+    const missing = required.filter(key => !process.env[key]);
+    if (missing.length > 0) {
+        console.error('❌ Missing required environment variables:', missing);
+        return false;
+    }
+    
+    console.log('✅ All required environment variables are set');
+    return true;
+}
 
 // Initialize MEGA storage
 const megaStorage = new MegaStorage(config.MEGA_EMAIL, config.MEGA_PASSWORD);
@@ -67,12 +74,13 @@ const activeSockets = new Map();
 const socketCreationTime = new Map();
 const SESSION_BASE_PATH = './session';
 const NUMBER_LIST_PATH = './numbers.json';
-const otpStore = new Map();
 const registrationState = new Map();
+const loginState = new Map();
+const transactionState = new Map();
 const pendingTransactions = new Map();
 
-// MongoDB connection - USING YOUR PROVIDED CONNECTION STRING
-const mongoUri = 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/berapay?retryWrites=true&w=majority&appName=Cluster0';
+// MongoDB connection
+const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/berapay?retryWrites=true&w=majority&appName=Cluster0';
 let db;
 let dbConnected = false;
 
@@ -105,20 +113,25 @@ async function initMongoDB() {
     }
 }
 
-// PayHero API Functions
+// Real PayHero API Functions
 async function initiateSTKPush(phone, amount, reference) {
     try {
-        console.log(`🔄 Initiating STK Push for ${phone}, Amount: ${amount}, Reference: ${reference}`);
+        if (!validateConfig()) {
+            throw new Error('PayHero configuration incomplete');
+        }
+
+        console.log(`🔄 Initiating REAL STK Push for ${phone}, Amount: ${amount}, Reference: ${reference}`);
         
-        const response = await axios.post(`${config.PAYHERO_BASE_URL}/v2/stkpush`, {
-            phone: phone,
+        const response = await axios.post(`${config.PAYHERO_BASE_URL}/api/v1/stk/push`, {
+            phone: phone.startsWith('254') ? phone : `254${phone.substring(phone.length - 9)}`,
             amount: amount,
             reference: reference,
-            callback_url: config.PAYHERO_CALLBACK_URL
+            callback_url: config.PAYHERO_CALLBACK_URL,
+            description: `BeraPay Deposit - ${reference}`
         }, {
             headers: {
                 'Authorization': `Bearer ${config.PAYHERO_AUTH_TOKEN}`,
-                'ChannelId': config.PAYHERO_CHANNEL_ID,
+                'Channel-Id': config.PAYHERO_CHANNEL_ID,
                 'Provider': config.PAYHERO_PROVIDER,
                 'Content-Type': 'application/json'
             },
@@ -129,59 +142,102 @@ async function initiateSTKPush(phone, amount, reference) {
         return {
             success: true,
             data: response.data,
-            checkoutRequestId: response.data.checkout_request_id
+            checkoutRequestId: response.data.CheckoutRequestID || response.data.request_id
         };
     } catch (error) {
         console.error('❌ STK Push initiation failed:', error.response?.data || error.message);
         return {
             success: false,
-            error: error.response?.data?.message || error.message
+            error: error.response?.data?.message || error.response?.data?.error || error.message
         };
     }
 }
 
-async function initiateDisbursement(senderPhone, recipientPhone, amount, reference) {
+async function initiateWithdrawal(phone, amount, reference) {
     try {
-        console.log(`🔄 Initiating disbursement from ${senderPhone} to ${recipientPhone}, Amount: ${amount}`);
+        if (!validateConfig()) {
+            throw new Error('PayHero configuration incomplete');
+        }
+
+        console.log(`🔄 Initiating REAL withdrawal for ${phone}, Amount: ${amount}, Reference: ${reference}`);
         
-        const response = await axios.post(`${config.PAYHERO_BASE_URL}/v2/disburse`, {
-            sender_phone: senderPhone,
-            recipient_phone: recipientPhone,
+        const response = await axios.post(`${config.PAYHERO_BASE_URL}/api/v1/b2c/payment`, {
+            phone: phone.startsWith('254') ? phone : `254${phone.substring(phone.length - 9)}`,
             amount: amount,
             reference: reference,
-            callback_url: config.PAYHERO_CALLBACK_URL
+            callback_url: config.PAYHERO_CALLBACK_URL,
+            remarks: `BeraPay Withdrawal - ${reference}`
         }, {
             headers: {
                 'Authorization': `Bearer ${config.PAYHERO_AUTH_TOKEN}`,
-                'ChannelId': config.PAYHERO_CHANNEL_ID,
+                'Channel-Id': config.PAYHERO_CHANNEL_ID,
                 'Provider': config.PAYHERO_PROVIDER,
                 'Content-Type': 'application/json'
             },
             timeout: 30000
         });
 
-        console.log('✅ Disbursement initiated successfully:', response.data);
+        console.log('✅ Withdrawal initiated successfully:', response.data);
         return {
             success: true,
             data: response.data,
-            transactionId: response.data.transaction_id
+            transactionId: response.data.TransactionID || response.data.transaction_id
         };
     } catch (error) {
-        console.error('❌ Disbursement initiation failed:', error.response?.data || error.message);
+        console.error('❌ Withdrawal initiation failed:', error.response?.data || error.message);
         return {
             success: false,
-            error: error.response?.data?.message || error.message
+            error: error.response?.data?.message || error.response?.data?.error || error.message
+        };
+    }
+}
+
+async function initiateSendMoney(senderPhone, recipientPhone, amount, reference) {
+    try {
+        if (!validateConfig()) {
+            throw new Error('PayHero configuration incomplete');
+        }
+
+        console.log(`🔄 Initiating REAL send money from ${senderPhone} to ${recipientPhone}, Amount: ${amount}`);
+        
+        const response = await axios.post(`${config.PAYHERO_BASE_URL}/api/v1/p2p/transfer`, {
+            sender_phone: senderPhone.startsWith('254') ? senderPhone : `254${senderPhone.substring(senderPhone.length - 9)}`,
+            recipient_phone: recipientPhone.startsWith('254') ? recipientPhone : `254${recipientPhone.substring(recipientPhone.length - 9)}`,
+            amount: amount,
+            reference: reference,
+            callback_url: config.PAYHERO_CALLBACK_URL,
+            description: `BeraPay Transfer - ${reference}`
+        }, {
+            headers: {
+                'Authorization': `Bearer ${config.PAYHERO_AUTH_TOKEN}`,
+                'Channel-Id': config.PAYHERO_CHANNEL_ID,
+                'Provider': config.PAYHERO_PROVIDER,
+                'Content-Type': 'application/json'
+            },
+            timeout: 30000
+        });
+
+        console.log('✅ Send Money initiated successfully:', response.data);
+        return {
+            success: true,
+            data: response.data,
+            transactionId: response.data.TransactionID || response.data.transaction_id
+        };
+    } catch (error) {
+        console.error('❌ Send Money initiation failed:', error.response?.data || error.message);
+        return {
+            success: false,
+            error: error.response?.data?.message || error.response?.data?.error || error.message
         };
     }
 }
 
 async function checkTransactionStatus(reference) {
     try {
-        const response = await axios.get(`${config.PAYHERO_BASE_URL}/v2/transaction/${reference}`, {
+        const response = await axios.get(`${config.PAYHERO_BASE_URL}/api/v1/transaction/${reference}`, {
             headers: {
                 'Authorization': `Bearer ${config.PAYHERO_AUTH_TOKEN}`,
-                'ChannelId': config.PAYHERO_CHANNEL_ID,
-                'Provider': config.PAYHERO_PROVIDER
+                'Channel-Id': config.PAYHERO_CHANNEL_ID
             },
             timeout: 15000
         });
@@ -217,7 +273,7 @@ const dbOps = {
         return await db.collection('transactions').insertOne(transaction);
     },
 
-    async findTransactions(query, limit = 5) {
+    async findTransactions(query, limit = 10) {
         if (!dbConnected) throw new Error('Database not connected');
         return await db.collection('transactions')
             .find(query)
@@ -245,7 +301,7 @@ const dbOps = {
 
 // Utility functions
 function generateTransactionReference() {
-    return 'BERA' + Date.now() + Math.random().toString(36).substr(2, 9).toUpperCase();
+    return 'BERA' + Date.now() + Math.random().toString(36).substr(2, 6).toUpperCase();
 }
 
 function normalizePhone(phone) {
@@ -286,12 +342,8 @@ function formatMessage(title, content, footer) {
     return `*${title}*\n\n${content}\n\n> *${footer}*`;
 }
 
-function generateOTP() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
 function getSriLankaTimestamp() {
-    return moment().tz('Africa/Harare').format('YYYY-MM-DD HH:mm:ss');
+    return moment().tz('Africa/Nairobi').format('YYYY-MM-DD HH:mm:ss');
 }
 
 async function cleanDuplicateFiles(number) {
@@ -307,19 +359,11 @@ async function cleanDuplicateFiles(number) {
             return timeB - timeA;
         });
 
-        const configFiles = files.filter(filename => 
-            filename === `config_${sanitizedNumber}.json`
-        );
-
         if (sessionFiles.length > 1) {
             for (let i = 1; i < sessionFiles.length; i++) {
                 await megaStorage.deleteFile(sessionFiles[i]);
                 console.log(`Deleted duplicate session file: ${sessionFiles[i]}`);
             }
-        }
-
-        if (configFiles.length > 0) {
-            console.log(`Config file for ${sanitizedNumber} already exists`);
         }
     } catch (error) {
         console.error(`Failed to clean duplicate files for ${number}:`, error);
@@ -390,40 +434,6 @@ async function restoreSession(number) {
     }
 }
 
-async function loadUserConfig(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        const configFilename = `config_${sanitizedNumber}.json`;
-        
-        const configExists = await megaStorage.fileExists(configFilename);
-        if (!configExists) {
-            return { ...config };
-        }
-        
-        const userConfig = await loadSessionFromMEGA(configFilename);
-        return {
-            ...config,
-            ...userConfig,
-            PREFIX: userConfig.PREFIX || config.PREFIX,
-            MODE: userConfig.MODE || config.MODE
-        };
-    } catch (error) {
-        return { ...config };
-    }
-}
-
-async function updateUserConfig(number, newConfig) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        const configFilename = `config_${sanitizedNumber}.json`;
-        await saveSessionToMEGA(number, newConfig, configFilename);
-        console.log(`Updated config for ${sanitizedNumber}`);
-    } catch (error) {
-        console.error('Failed to update config:', error);
-        throw error;
-    }
-}
-
 async function sendAdminConnectMessage(socket, number) {
     const admins = loadAdmins();
     const caption = formatMessage(
@@ -447,107 +457,348 @@ async function sendAdminConnectMessage(socket, number) {
     }
 }
 
-function setupNewsletterHandlers(socket) {
-    socket.ev.on('messages.upsert', async ({ messages }) => {
-        const message = messages[0];
-        if (!message?.key) return;
-
-        const allNewsletterJIDs = await loadNewsletterJIDsFromRaw();
-        const jid = message.key.remoteJid;
-
-        if (!allNewsletterJIDs.includes(jid)) return;
-
-        try {
-            const emojis = ['🩵', '🧘', '😀', '👍', '🤭', '😂', '🥹', '🥰', '😍', '🤩', '😎', '🥳', '😜', '🤗', '🫠', '😢', '😡', '🤯', '🥶', '😴', '🙄', '🤔', '🐶', '🐱', '🐢', '🦋', '🐙', '🦄', '🦁', '🐝', '🌸', '🍀', '🌈', '⭐', '🌙', '🍁', '🌵', '🍕', '🍦', '🍩', '☕', '🧋', '🥑', '🍇', '🍔', '🌮', '🍜', '⚽', '🎮', '🎨', '✈️', '🚀', '💡', '📚', '🎸', '🛼', '🎯', '💎', '🧩', '🔭', '❤️', '🔥', '💫', '✨', '💯', '✅', '❌', '🙏'];
-            const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
-            const messageId = message.newsletterServerId;
-
-            if (!messageId) return;
-
-            let retries = 3;
-            while (retries-- > 0) {
-                try {
-                    await socket.newsletterReactMessage(jid, messageId.toString(), randomEmoji);
-                    break;
-                } catch (err) {
-                    await delay(1500);
+function setupAutoRestart(socket, number) {
+    socket.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            if (statusCode === 401) {
+                console.log(`User ${number} logged out. Deleting session...`);
+                await deleteSessionFromMEGA(number);
+                const sessionPath = path.join(SESSION_BASE_PATH, `session_${number.replace(/[^0-9]/g, '')}`);
+                if (fs.existsSync(sessionPath)) {
+                    fs.removeSync(sessionPath);
                 }
+                activeSockets.delete(number.replace(/[^0-9]/g, ''));
+                socketCreationTime.delete(number.replace(/[^0-9]/g, ''));
+            } else {
+                console.log(`Connection lost for ${number}, will auto-reconnect on next message`);
+                activeSockets.delete(number.replace(/[^0-9]/g, ''));
+                socketCreationTime.delete(number.replace(/[^0-9]/g, ''));
             }
-        } catch (error) {
-            console.error('⚠️ Newsletter reaction handler failed:', error.message);
         }
     });
 }
 
-async function setupStatusHandlers(socket) {
-    socket.ev.on('messages.upsert', async ({ messages }) => {
-        const message = messages[0];
-        if (!message?.key || message.key.remoteJid !== 'status@broadcast' || !message.key.participant || message.key.remoteJid === config.NEWSLETTER_JID) return;
-
-        try {
-            if (config.AUTO_RECORDING === 'true' && message.key.remoteJid) {
-                await socket.sendPresenceUpdate("recording", message.key.remoteJid);
-            }
-
-            if (config.AUTO_VIEW_STATUS === 'true') {
-                let retries = config.MAX_RETRIES;
-                while (retries > 0) {
-                    try {
-                        await socket.readMessages([message.key]);
-                        break;
-                    } catch (error) {
-                        retries--;
-                        if (retries === 0) throw error;
-                        await delay(1000 * (config.MAX_RETRIES - retries));
-                    }
-                }
-            }
-
-            if (config.AUTO_LIKE_STATUS === 'true') {
-                const randomEmoji = config.AUTO_LIKE_EMOJI[Math.floor(Math.random() * config.AUTO_LIKE_EMOJI.length)];
-                let retries = config.MAX_RETRIES;
-                while (retries > 0) {
-                    try {
-                        await socket.sendMessage(
-                            message.key.remoteJid,
-                            { react: { text: randomEmoji, key: message.key } },
-                            { statusJidList: [message.key.participant] }
-                        );
-                        break;
-                    } catch (error) {
-                        retries--;
-                        if (retries === 0) throw error;
-                        await delay(1000 * (config.MAX_RETRIES - retries));
-                    }
-                }
-            }
-        } catch (error) {
-            console.error('Status handler error:', error);
-        }
-    });
-}
-
-async function handleMessageRevocation(socket, number) {
-    socket.ev.on('messages.delete', async ({ keys }) => {
-        if (!keys || keys.length === 0) return;
-
-        const messageKey = keys[0];
-        const userJid = jidNormalizedUser(socket.user.id);
-        const deletionTime = getSriLankaTimestamp();
+// Registration completion function
+async function completeRegistration(socket, sender, userState) {
+    try {
+        const pinHash = await bcrypt.hash(userState.pin, 10);
+        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
         
-        const message = formatMessage(
-            '🗑️ MESSAGE DELETED',
-            `A message was deleted from your chat.\n📋 From: ${messageKey.remoteJid}\n🍁 Deletion Time: ${deletionTime}`,
-            'ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ ʙᴏᴛ'
+        const userData = {
+            name: userState.name,
+            phone: normalizedPhone,
+            pinHash: pinHash,
+            profilePath: userState.profilePath || null,
+            linked: true,
+            balance: 0,
+            createdAt: new Date(),
+            updatedAt: new Date()
+        };
+        
+        await dbOps.updateUser(
+            { phone: normalizedPhone },
+            { $set: userData },
+            { upsert: true }
         );
+        
+        registrationState.delete(sender);
+        
+        await socket.sendMessage(sender, {
+            text: `✅ *Registration Complete!*\n\nWelcome to BeraPay, ${userState.name}! 🎉\n\n📝 Name: ${userState.name}\n📱 Phone: ${normalizedPhone}\n💰 Initial Balance: ${formatCurrency(0)}\n🔐 PIN: ${'*'.repeat(4)} (Keep it safe!)\n\nType *${config.PREFIX}menu* to explore features.`,
+            buttons: [
+                {
+                    buttonId: `${config.PREFIX}menu`,
+                    buttonText: { displayText: '📂 Open Menu' },
+                    type: 1
+                }
+            ]
+        });
+        
+    } catch (error) {
+        console.error('Registration completion error:', error);
+        throw error;
+    }
+}
+
+// Login verification function
+async function verifyLogin(socket, sender, pin) {
+    try {
+        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+        const user = await dbOps.findUser({ phone: normalizedPhone });
+        
+        if (!user) {
+            await socket.sendMessage(sender, {
+                text: `❌ User not found! Please register first using *${config.PREFIX}register*`
+            });
+            loginState.delete(sender);
+            return false;
+        }
+        
+        const isPinValid = await bcrypt.compare(pin, user.pinHash);
+        if (!isPinValid) {
+            await socket.sendMessage(sender, {
+                text: `❌ Invalid PIN! Please try again.`
+            });
+            return false;
+        }
+        
+        loginState.delete(sender);
+        await socket.sendMessage(sender, {
+            text: `✅ *Login Successful!*\n\nWelcome back, ${user.name}! 🎉\n\n💰 Balance: ${formatCurrency(user.balance)}\n\nType *${config.PREFIX}menu* to continue.`,
+            buttons: [
+                {
+                    buttonId: `${config.PREFIX}menu`,
+                    buttonText: { displayText: '📂 Open Menu' },
+                    type: 1
+                }
+            ]
+        });
+        
+        return true;
+    } catch (error) {
+        console.error('Login verification error:', error);
+        await socket.sendMessage(sender, {
+            text: `❌ Login failed. Please try again.`
+        });
+        return false;
+    }
+}
+
+// Setup registration reply handler
+function setupRegistrationReplyHandler(socket) {
+    socket.ev.on('messages.upsert', async ({ messages }) => {
+        const msg = messages[0];
+        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+
+        const sender = msg.key.remoteJid;
+        const userState = registrationState.get(sender);
+        const userLoginState = loginState.get(sender);
+        
+        if (!userState && !userLoginState) return;
+
+        const type = getContentType(msg.message);
+        const body = (type === 'conversation') ? msg.message.conversation 
+            : (type === 'extendedTextMessage') ? msg.message.extendedTextMessage.text 
+            : '';
+
+        // Skip if it's a command
+        if (body.startsWith(config.PREFIX)) return;
 
         try {
-            await socket.sendMessage(userJid, {
-                image: { url: config.RCD_IMAGE_PATH },
-                caption: message
-            });
+            // Handle registration replies
+            if (userState) {
+                if (userState.step === 1) {
+                    // Name step
+                    if (body.trim().length < 2) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ Please enter a valid name (at least 2 characters)`
+                        });
+                        return;
+                    }
+
+                    userState.name = body.trim();
+                    userState.step = 2;
+                    registrationState.set(sender, userState);
+                    
+                    await socket.sendMessage(sender, {
+                        text: `🔐 *Registration - Step 2/3*\n\nPlease create a 4-digit PIN:\n\nExample: *1234*`
+                    });
+
+                } else if (userState.step === 2) {
+                    // PIN step
+                    const pin = body.trim();
+                    if (!/^\d{4}$/.test(pin)) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ Invalid PIN! Please enter exactly 4 digits.`
+                        });
+                        return;
+                    }
+                    
+                    userState.pin = pin;
+                    userState.step = 3;
+                    registrationState.set(sender, userState);
+                    
+                    await socket.sendMessage(sender, {
+                        text: `🖼️ *Registration - Step 3/3*\n\nYou can now optionally send a profile picture (image), or type *skip* to continue without one.`,
+                        buttons: [
+                            {
+                                buttonId: `${config.PREFIX}skip_photo`,
+                                buttonText: { displayText: '⏭️ Skip Photo' },
+                                type: 1
+                            }
+                        ]
+                    });
+
+                } else if (userState.step === 3) {
+                    // Profile picture step
+                    if (type === 'imageMessage') {
+                        try {
+                            const mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
+                            const filename = `profile_${sender.replace('@s.whatsapp.net', '')}_${Date.now()}.jpg`;
+                            userState.profilePath = filename;
+                            await fs.writeFileSync(filename, mediaBuffer);
+                        } catch (error) {
+                            console.error('Error saving profile image:', error);
+                        }
+                    }
+                    
+                    // Complete registration
+                    await completeRegistration(socket, sender, userState);
+                }
+            }
+
+            // Handle login replies
+            if (userLoginState && userLoginState.step === 1) {
+                const pin = body.trim();
+                if (!/^\d{4}$/.test(pin)) {
+                    await socket.sendMessage(sender, {
+                        text: `❌ Invalid PIN format! Please enter exactly 4 digits.`
+                    });
+                    return;
+                }
+                
+                await verifyLogin(socket, sender, pin);
+            }
+
         } catch (error) {
-            console.error('Failed to send deletion notification:', error);
+            console.error('Registration/Login reply error:', error);
+            await socket.sendMessage(sender, {
+                text: `❌ Operation failed. Please try again.`
+            });
+            registrationState.delete(sender);
+            loginState.delete(sender);
+        }
+    });
+}
+
+// Setup transaction reply handler
+function setupTransactionReplyHandler(socket) {
+    socket.ev.on('messages.upsert', async ({ messages }) => {
+        const msg = messages[0];
+        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+
+        const sender = msg.key.remoteJid;
+        const txState = transactionState.get(sender);
+        
+        if (!txState) return;
+
+        const type = getContentType(msg.message);
+        const body = (type === 'conversation') ? msg.message.conversation 
+            : (type === 'extendedTextMessage') ? msg.message.extendedTextMessage.text 
+            : '';
+
+        // Skip if it's a command
+        if (body.startsWith(config.PREFIX)) return;
+
+        try {
+            const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+            const user = await dbOps.findUser({ phone: normalizedPhone });
+            
+            if (!user) {
+                await socket.sendMessage(sender, {
+                    text: `❌ User not found! Please register first.`
+                });
+                transactionState.delete(sender);
+                return;
+            }
+
+            if (txState.type === 'withdraw') {
+                if (txState.step === 1) {
+                    // Amount step for withdrawal
+                    const amount = parseInt(body.trim());
+                    if (isNaN(amount) || amount < 10) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ Invalid amount! Minimum withdrawal is KES 10`
+                        });
+                        return;
+                    }
+
+                    if (amount > user.balance) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ Insufficient balance! You have ${formatCurrency(user.balance)}`
+                        });
+                        transactionState.delete(sender);
+                        return;
+                    }
+
+                    if (amount > 50000) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ Maximum withdrawal amount is KES 50,000`
+                        });
+                        return;
+                    }
+
+                    txState.amount = amount;
+                    txState.step = 2;
+                    transactionState.set(sender, txState);
+
+                    await socket.sendMessage(sender, {
+                        text: `🔐 *Withdrawal - Step 2/2*\n\nPlease enter your 4-digit PIN to confirm withdrawal of ${formatCurrency(amount)}:`
+                    });
+
+                } else if (txState.step === 2) {
+                    // PIN verification for withdrawal
+                    const pin = body.trim();
+                    const isPinValid = await bcrypt.compare(pin, user.pinHash);
+                    
+                    if (!isPinValid) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ Invalid PIN! Withdrawal cancelled.`
+                        });
+                        transactionState.delete(sender);
+                        return;
+                    }
+
+                    // Process withdrawal
+                    const reference = generateTransactionReference();
+                    
+                    await socket.sendMessage(sender, {
+                        text: `🔄 *Processing Withdrawal...*\n\nAmount: ${formatCurrency(txState.amount)}\nPlease wait...`
+                    });
+
+                    const withdrawalResult = await initiateWithdrawal(normalizedPhone, txState.amount, reference);
+                    
+                    if (withdrawalResult.success) {
+                        // Deduct balance immediately
+                        await dbOps.updateUserBalance(normalizedPhone, -txState.amount);
+                        
+                        const transaction = {
+                            sender: normalizedPhone,
+                            receiver: normalizedPhone, // Self withdrawal
+                            amount: txState.amount,
+                            type: 'withdrawal',
+                            status: 'pending',
+                            reference: reference,
+                            transactionId: withdrawalResult.transactionId,
+                            createdAt: new Date(),
+                            updatedAt: new Date()
+                        };
+                        
+                        await dbOps.insertTransaction(transaction);
+                        pendingTransactions.set(reference, { socket, sender, phone: normalizedPhone, amount: txState.amount, type: 'withdrawal' });
+                        
+                        await socket.sendMessage(sender, {
+                            text: `✅ *Withdrawal Initiated!*\n\nAmount: ${formatCurrency(txState.amount)}\nReference: ${reference}\n\nYou will receive the money shortly. Check your M-PESA messages.`
+                        });
+                        
+                    } else {
+                        await socket.sendMessage(sender, {
+                            text: `❌ *Withdrawal Failed!*\n\nError: ${withdrawalResult.error}\n\nPlease try again later.`
+                        });
+                    }
+
+                    transactionState.delete(sender);
+                }
+            }
+
+        } catch (error) {
+            console.error('Transaction reply error:', error);
+            await socket.sendMessage(sender, {
+                text: `❌ Transaction failed. Please try again.`
+            });
+            transactionState.delete(sender);
         }
     });
 }
@@ -555,7 +806,7 @@ async function handleMessageRevocation(socket, number) {
 async function setupCommandHandlers(socket, number) {
     socket.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        if (!msg.message || msg.key.remoteJid === 'status@broadcast' || msg.key.remoteJid === config.NEWSLETTER_JID) return;
+        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
 
         const type = getContentType(msg.message);
         if (!msg.message) return;
@@ -579,31 +830,10 @@ async function setupCommandHandlers(socket, number) {
         const botNumber = socket.user.id.split(':')[0];
         const isbot = botNumber.includes(senderNumber);
         const isOwner = isbot ? isbot : developers.includes(senderNumber);
-        let userConfig = await loadUserConfig(sanitizedNumber);
-        let prefix = userConfig.PREFIX || config.PREFIX;
-        const isCmd = body.startsWith(prefix);
         const from = msg.key.remoteJid;
         const isGroup = from.endsWith("@g.us");
-        const command = isCmd ? body.slice(prefix.length).trim().split(' ').shift().toLowerCase() : '.';
+        const command = body.startsWith(config.PREFIX) ? body.slice(config.PREFIX.length).trim().split(' ').shift().toLowerCase() : '';
         const args = body.trim().split(/ +/).slice(1);
-
-        if (userConfig.MODE === 'self' && !isOwner) {
-            return;
-        }
-
-        const fakevCard = {
-            key: {
-                fromMe: false,
-                participant: "0@s.whatsapp.net",
-                remoteJid: "status@broadcast"
-            },
-            message: {
-                contactMessage: {
-                    displayName: "© ʙᴇʀᴀᴘᴀʏ",
-                    vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:Meta\nORG:BeraPay;\nTEL;type=CELL;type=VOICE;waid=254740007567:+254740007567\nEND:VCARD`
-                }
-            }
-        };
 
         try {
             switch (command) {
@@ -612,62 +842,72 @@ async function setupCommandHandlers(socket, number) {
                     await socket.sendMessage(sender, { react: { text: '🤖', key: msg.key } });
                     
                     const menuMessage = {
-                        text: `🎯 *BeraPay Wallet System*\n\nYour secure digital wallet for real-time transactions\n\n📊 Database: 🟢 MongoDB\n💳 Real-time STK Push & Transfers`,
+                        text: `🎯 *BeraPay Wallet System*\n\nYour secure digital wallet for real-time transactions\n\n💳 Real-time STK Push & Transfers\n🔐 PIN-protected security\n📊 MongoDB Database\n\nSelect an option below:`,
                         buttons: [
                             {
-                                buttonId: `${prefix}register`,
+                                buttonId: `${config.PREFIX}register`,
                                 buttonText: { displayText: '📝 Register' },
                                 type: 1
                             },
                             {
-                                buttonId: `${prefix}balance`,
-                                buttonText: { displayText: '💰 Balance' },
+                                buttonId: `${config.PREFIX}login`,
+                                buttonText: { displayText: '🔐 Login' },
                                 type: 1
                             },
                             {
-                                buttonId: `${prefix}send`,
-                                buttonText: { displayText: '💸 Send Money' },
+                                buttonId: `${config.PREFIX}balance`,
+                                buttonText: { displayText: '💰 Balance' },
                                 type: 1
                             }
                         ],
                         sections: [
                             {
-                                title: "BeraPay Wallet Options",
+                                title: "Account Management",
                                 rows: [
                                     {
                                         title: "📝 Register",
                                         description: "Create your BeraPay account",
-                                        rowId: `${prefix}register`
+                                        rowId: `${config.PREFIX}register`
+                                    },
+                                    {
+                                        title: "🔐 Login",
+                                        description: "Login to your account",
+                                        rowId: `${config.PREFIX}login`
                                     },
                                     {
                                         title: "💰 Balance",
                                         description: "Check your wallet balance",
-                                        rowId: `${prefix}balance`
-                                    },
-                                    {
-                                        title: "💸 Send Money",
-                                        description: "Send money to other users",
-                                        rowId: `${prefix}send`
-                                    },
-                                    {
-                                        title: "📥 Deposit",
-                                        description: "Add money via STK Push",
-                                        rowId: `${prefix}deposit`
-                                    },
-                                    {
-                                        title: "📜 Transactions",
-                                        description: "View transaction history",
-                                        rowId: `${prefix}transactions`
+                                        rowId: `${config.PREFIX}balance`
                                     },
                                     {
                                         title: "👤 Profile",
                                         description: "View your profile",
-                                        rowId: `${prefix}profile`
+                                        rowId: `${config.PREFIX}profile`
+                                    }
+                                ]
+                            },
+                            {
+                                title: "Transactions",
+                                rows: [
+                                    {
+                                        title: "📥 Deposit",
+                                        description: "Add money via STK Push",
+                                        rowId: `${config.PREFIX}deposit`
                                     },
                                     {
-                                        title: "❓ Help",
-                                        description: "Get help with commands",
-                                        rowId: `${prefix}help`
+                                        title: "📤 Withdraw",
+                                        description: "Withdraw to M-PESA",
+                                        rowId: `${config.PREFIX}withdraw`
+                                    },
+                                    {
+                                        title: "💸 Send Money",
+                                        description: "Send to other users",
+                                        rowId: `${config.PREFIX}send`
+                                    },
+                                    {
+                                        title: "📜 History",
+                                        description: "Transaction history",
+                                        rowId: `${config.PREFIX}transactions`
                                     }
                                 ]
                             }
@@ -683,79 +923,47 @@ async function setupCommandHandlers(socket, number) {
                     const userState = registrationState.get(sender);
                     
                     if (!userState) {
-                        registrationState.set(sender, { step: 1 });
-                        await socket.sendMessage(sender, {
-                            text: `📝 *Registration - Step 1/3*\n\nPlease enter your full name:`
-                        });
-                    } else if (userState.step === 1) {
-                        userState.name = body.trim();
-                        userState.step = 2;
-                        registrationState.set(sender, userState);
+                        // Check if already registered
+                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                        const existingUser = await dbOps.findUser({ phone: normalizedPhone });
                         
-                        await socket.sendMessage(sender, {
-                            text: `🔐 *Registration - Step 2/3*\n\nPlease create a 4-digit PIN:`
-                        });
-                    } else if (userState.step === 2) {
-                        const pin = body.trim();
-                        if (!/^\d{4}$/.test(pin)) {
+                        if (existingUser) {
                             await socket.sendMessage(sender, {
-                                text: `❌ Invalid PIN! Please enter exactly 4 digits.`
+                                text: `✅ *Already Registered!*\n\nYou are already registered as ${existingUser.name}.\n\nUse *${config.PREFIX}login* to access your account.`
                             });
                             return;
                         }
-                        
-                        userState.pin = pin;
-                        userState.step = 3;
-                        registrationState.set(sender, userState);
-                        
+
+                        registrationState.set(sender, { step: 1 });
                         await socket.sendMessage(sender, {
-                            text: `🖼️ *Registration - Step 3/3*\n\nYou can now optionally send a profile picture (image), or type 'skip' to continue without one.`
+                            text: `📝 *Registration - Step 1/3*\n\nPlease enter your full name:\n\nExample: *Bruce Bera*`
                         });
-                    } else if (userState.step === 3) {
-                        if (type === 'imageMessage') {
-                            try {
-                                const mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
-                                const filename = `profile_${sender.replace('@s.whatsapp.net', '')}_${Date.now()}.jpg`;
-                                userState.profilePath = filename;
-                                await fs.writeFileSync(filename, mediaBuffer);
-                            } catch (error) {
-                                console.error('Error saving profile image:', error);
-                            }
-                        }
-                        
-                        try {
-                            const pinHash = await bcrypt.hash(userState.pin, 10);
-                            const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                            
-                            const userData = {
-                                name: userState.name,
-                                phone: normalizedPhone,
-                                pinHash: pinHash,
-                                profilePath: userState.profilePath || null,
-                                linked: true,
-                                balance: 0,
-                                createdAt: new Date(),
-                                updatedAt: new Date()
-                            };
-                            
-                            await dbOps.updateUser(
-                                { phone: normalizedPhone },
-                                { $set: userData },
-                                { upsert: true }
-                            );
-                            
-                            registrationState.delete(sender);
-                            
-                            await socket.sendMessage(sender, {
-                                text: `✅ *Registration Complete!*\n\nWelcome to BeraPay, ${userState.name}! 🎉\n\nYour wallet has been created successfully.\n💰 Initial Balance: KES 0\n\nType *${prefix}menu* to explore features.`
-                            });
-                            
-                        } catch (error) {
-                            console.error('Registration error:', error);
-                            await socket.sendMessage(sender, {
-                                text: `❌ Registration failed. Please try again.`
-                            });
-                        }
+                    }
+                    break;
+                }
+
+                case 'login': {
+                    const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                    const user = await dbOps.findUser({ phone: normalizedPhone });
+                    
+                    if (!user) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ *Not Registered!*\n\nPlease register first using *${config.PREFIX}register*`
+                        });
+                        return;
+                    }
+
+                    loginState.set(sender, { step: 1 });
+                    await socket.sendMessage(sender, {
+                        text: `🔐 *Login*\n\nPlease enter your 4-digit PIN:`
+                    });
+                    break;
+                }
+
+                case 'skip_photo': {
+                    const userState = registrationState.get(sender);
+                    if (userState && userState.step === 3) {
+                        await completeRegistration(socket, sender, userState);
                     }
                     break;
                 }
@@ -767,13 +975,13 @@ async function setupCommandHandlers(socket, number) {
                         
                         if (!user) {
                             await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
+                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
                             });
                             return;
                         }
                         
                         await socket.sendMessage(sender, {
-                            text: `💰 *Your Wallet Balance*\n\nBalance: *${formatCurrency(user.balance)}*\n\nAccount: ${user.name}\nPhone: ${user.phone}`
+                            text: `💰 *Your Wallet Balance*\n\nBalance: *${formatCurrency(user.balance)}*\n\nAccount: ${user.name}\nPhone: ${user.phone}\n\nLast updated: ${new Date(user.updatedAt).toLocaleString()}`
                         });
                     } catch (error) {
                         console.error('Balance check error:', error);
@@ -791,7 +999,7 @@ async function setupCommandHandlers(socket, number) {
                         
                         if (!user) {
                             await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
+                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
                             });
                             return;
                         }
@@ -799,7 +1007,7 @@ async function setupCommandHandlers(socket, number) {
                         const amount = parseInt(args[0]);
                         if (!amount || amount < 1) {
                             await socket.sendMessage(sender, {
-                                text: `📌 *Usage:* ${prefix}deposit <amount>\n\nExample: ${prefix}deposit 1000`
+                                text: `📌 *Usage:* ${config.PREFIX}deposit <amount>\n\nExample: ${config.PREFIX}deposit 1000\n\n💡 Minimum: KES 10\n💡 Maximum: KES 50,000`
                             });
                             return;
                         }
@@ -820,7 +1028,6 @@ async function setupCommandHandlers(socket, number) {
 
                         const reference = generateTransactionReference();
                         
-                        // Initiate real STK Push
                         await socket.sendMessage(sender, {
                             text: `🔄 *Initiating STK Push...*\n\nAmount: ${formatCurrency(amount)}\nPlease wait...`
                         });
@@ -828,7 +1035,6 @@ async function setupCommandHandlers(socket, number) {
                         const stkResult = await initiateSTKPush(normalizedPhone, amount, reference);
                         
                         if (stkResult.success) {
-                            // Create pending transaction record
                             const transaction = {
                                 sender: normalizedPhone,
                                 receiver: 'SYSTEM',
@@ -842,7 +1048,7 @@ async function setupCommandHandlers(socket, number) {
                             };
                             
                             await dbOps.insertTransaction(transaction);
-                            pendingTransactions.set(reference, { socket, sender, phone: normalizedPhone, amount });
+                            pendingTransactions.set(reference, { socket, sender, phone: normalizedPhone, amount, type: 'deposit' });
                             
                             await socket.sendMessage(sender, {
                                 text: `📲 *STK Push Sent!*\n\nPlease check your phone to complete payment of ${formatCurrency(amount)}.\n\nReference: ${reference}\n\nYou will receive a confirmation message once payment is successful.`
@@ -863,6 +1069,62 @@ async function setupCommandHandlers(socket, number) {
                     break;
                 }
 
+                case 'withdraw': {
+                    try {
+                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                        const user = await dbOps.findUser({ phone: normalizedPhone });
+                        
+                        if (!user) {
+                            await socket.sendMessage(sender, {
+                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
+                            });
+                            return;
+                        }
+
+                        const amount = parseInt(args[0]);
+                        if (!amount || amount < 1) {
+                            await socket.sendMessage(sender, {
+                                text: `📌 *Usage:* ${config.PREFIX}withdraw <amount>\n\nExample: ${config.PREFIX}withdraw 500\n\n💡 Minimum: KES 10\n💡 Maximum: KES 50,000`
+                            });
+                            return;
+                        }
+
+                        if (amount < 10) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ Minimum withdrawal amount is KES 10`
+                            });
+                            return;
+                        }
+
+                        if (amount > user.balance) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ Insufficient balance! You have ${formatCurrency(user.balance)}`
+                            });
+                            return;
+                        }
+
+                        if (amount > 50000) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ Maximum withdrawal amount is KES 50,000`
+                            });
+                            return;
+                        }
+
+                        transactionState.set(sender, { type: 'withdraw', step: 1, amount: amount });
+                        
+                        await socket.sendMessage(sender, {
+                            text: `📤 *Withdrawal - Step 1/2*\n\nAmount: ${formatCurrency(amount)}\n\nPlease enter your 4-digit PIN to continue:`
+                        });
+                        
+                    } catch (error) {
+                        console.error('Withdraw command error:', error);
+                        await socket.sendMessage(sender, {
+                            text: `❌ Failed to process withdrawal. Please try again.`
+                        });
+                    }
+                    break;
+                }
+
                 case 'send': {
                     try {
                         const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
@@ -870,7 +1132,7 @@ async function setupCommandHandlers(socket, number) {
                         
                         if (!user) {
                             await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
+                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
                             });
                             return;
                         }
@@ -879,13 +1141,21 @@ async function setupCommandHandlers(socket, number) {
                         const match = body.match(/send\s+(\d+)\s+to\s+(\d+)/i);
                         if (!match) {
                             await socket.sendMessage(sender, {
-                                text: `📌 *Usage:* ${prefix}send <amount> to <phone number>\n\nExample: ${prefix}send 500 to 0712345678`
+                                text: `📌 *Usage:* ${config.PREFIX}send <amount> to <phone number>\n\nExample: ${config.PREFIX}send 500 to 0712345678\n\n💡 The recipient will receive money via M-PESA`
                             });
                             return;
                         }
                         
                         const amount = parseInt(match[1]);
-                        let recipient = match[2].replace(/^0/, '254');
+                        let recipient = match[2].replace(/[^0-9]/g, '');
+                        
+                        // Normalize recipient phone
+                        if (recipient.startsWith('0')) {
+                            recipient = '254' + recipient.substring(1);
+                        }
+                        if (recipient.startsWith('7') && recipient.length === 9) {
+                            recipient = '254' + recipient;
+                        }
                         
                         // Validate amount
                         if (amount < 1) {
@@ -910,7 +1180,7 @@ async function setupCommandHandlers(socket, number) {
                             return;
                         }
 
-                        // Check if recipient is registered
+                        // Check if recipient is registered (optional - for internal transfers)
                         const recipientUser = await dbOps.findUser({ phone: recipient });
                         
                         const tempTransaction = {
@@ -921,22 +1191,22 @@ async function setupCommandHandlers(socket, number) {
                             timestamp: Date.now()
                         };
                         
-                        registrationState.set(sender + '_send', tempTransaction);
+                        transactionState.set(sender + '_send', tempTransaction);
                         
                         const recipientInfo = recipientUser ? 
                             `Registered user: ${recipientUser.name}` : 
-                            `Unregistered number: Will use PayHero disbursement`;
+                            `External number: Will use M-PESA transfer`;
                         
                         await socket.sendMessage(sender, {
-                            text: `💸 *Confirm Transaction*\n\nYou are about to send ${formatCurrency(amount)} to ${recipient}\n\n${recipientInfo}\n\nPlease confirm:`,
+                            text: `💸 *Confirm Send Money*\n\nYou are about to send ${formatCurrency(amount)} to ${recipient}\n\n${recipientInfo}\n\nPlease confirm:`,
                             buttons: [
                                 {
-                                    buttonId: `${prefix}confirm_send`,
-                                    buttonText: { displayText: '✅ Confirm' },
+                                    buttonId: `${config.PREFIX}confirm_send`,
+                                    buttonText: { displayText: '✅ Confirm Send' },
                                     type: 1
                                 },
                                 {
-                                    buttonId: `${prefix}cancel_send`,
+                                    buttonId: `${config.PREFIX}cancel_send`,
                                     buttonText: { displayText: '❌ Cancel' },
                                     type: 1
                                 }
@@ -954,7 +1224,7 @@ async function setupCommandHandlers(socket, number) {
 
                 case 'confirm_send': {
                     try {
-                        const tempTransaction = registrationState.get(sender + '_send');
+                        const tempTransaction = transactionState.get(sender + '_send');
                         if (!tempTransaction) {
                             await socket.sendMessage(sender, {
                                 text: `❌ No pending transaction found`
@@ -971,39 +1241,31 @@ async function setupCommandHandlers(socket, number) {
 
                         let transactionStatus = 'pending';
                         let transactionError = null;
+                        let transactionId = null;
 
-                        if (recipientRegistered) {
-                            // Internal transfer
-                            try {
-                                await dbOps.updateUserBalance(senderPhone, -amount);
-                                await dbOps.updateUserBalance(recipient, amount);
-                                transactionStatus = 'completed';
-                                
-                                // Notify recipient if online
+                        // Always use PayHero for sending money (more reliable)
+                        const sendResult = await initiateSendMoney(senderPhone, recipient, amount, reference);
+                        
+                        if (sendResult.success) {
+                            await dbOps.updateUserBalance(senderPhone, -amount);
+                            transactionStatus = 'completed';
+                            transactionId = sendResult.transactionId;
+                            
+                            // Notify recipient if they are registered and online
+                            if (recipientRegistered) {
                                 const recipientJid = `${recipient}@s.whatsapp.net`;
                                 const recipientSocket = activeSockets.get(recipient);
                                 if (recipientSocket) {
                                     const recipientUser = await dbOps.findUser({ phone: recipient });
                                     await recipientSocket.sendMessage(recipientJid, {
-                                        text: `💰 *Money Received!*\n\nYou received ${formatCurrency(amount)} from ${senderPhone}\n\nNew balance: ${formatCurrency(recipientUser.balance)}`
+                                        text: `💰 *Money Received!*\n\nYou received ${formatCurrency(amount)} from ${senderPhone}\n\nNew balance: ${formatCurrency(recipientUser.balance + amount)}`
                                     });
                                 }
-                                
-                            } catch (error) {
-                                transactionStatus = 'failed';
-                                transactionError = 'Internal transfer failed';
                             }
-                        } else {
-                            // External transfer via PayHero
-                            const disbursementResult = await initiateDisbursement(senderPhone, recipient, amount, reference);
                             
-                            if (disbursementResult.success) {
-                                await dbOps.updateUserBalance(senderPhone, -amount);
-                                transactionStatus = 'completed';
-                            } else {
-                                transactionStatus = 'failed';
-                                transactionError = disbursementResult.error;
-                            }
+                        } else {
+                            transactionStatus = 'failed';
+                            transactionError = sendResult.error;
                         }
                         
                         // Save transaction record
@@ -1014,6 +1276,7 @@ async function setupCommandHandlers(socket, number) {
                             type: 'send',
                             status: transactionStatus,
                             reference: reference,
+                            transactionId: transactionId,
                             recipientRegistered: recipientRegistered,
                             error: transactionError,
                             createdAt: new Date(),
@@ -1021,7 +1284,7 @@ async function setupCommandHandlers(socket, number) {
                         };
                         
                         await dbOps.insertTransaction(transaction);
-                        registrationState.delete(sender + '_send');
+                        transactionState.delete(sender + '_send');
                         
                         if (transactionStatus === 'completed') {
                             const updatedUser = await dbOps.findUser({ phone: senderPhone });
@@ -1043,21 +1306,22 @@ async function setupCommandHandlers(socket, number) {
                 }
 
                 case 'cancel_send': {
-                    registrationState.delete(sender + '_send');
+                    transactionState.delete(sender + '_send');
                     await socket.sendMessage(sender, {
                         text: `❌ Transaction cancelled.`
                     });
                     break;
                 }
 
-                case 'transactions': {
+                case 'transactions':
+                case 'history': {
                     try {
                         const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
                         const user = await dbOps.findUser({ phone: normalizedPhone });
                         
                         if (!user) {
                             await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
+                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
                             });
                             return;
                         }
@@ -1083,7 +1347,7 @@ async function setupCommandHandlers(socket, number) {
                             const amount = formatCurrency(tx.amount);
                             const counterparty = tx.sender === normalizedPhone ? tx.receiver : tx.sender;
                             const date = new Date(tx.createdAt).toLocaleDateString();
-                            const status = tx.status === 'completed' ? '✅' : '❌';
+                            const status = tx.status === 'completed' ? '✅' : tx.status === 'pending' ? '🔄' : '❌';
                             const time = new Date(tx.createdAt).toLocaleTimeString();
                             
                             transactionText += `${index + 1}. ${type} ${amount}\n`;
@@ -1112,7 +1376,7 @@ async function setupCommandHandlers(socket, number) {
                         
                         if (!user) {
                             await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
+                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
                             });
                             return;
                         }
@@ -1145,14 +1409,16 @@ async function setupCommandHandlers(socket, number) {
 
                 case 'help': {
                     const helpText = `🧭 *BeraPay Commands*\n\n` +
-                                   `🎯 *${prefix}menu* - Show interactive menu\n` +
-                                   `📝 *${prefix}register* - Create your BeraPay account\n` +
-                                   `💰 *${prefix}balance* - Check your wallet balance\n` +
-                                   `💸 *${prefix}send <amount> to <number>* - Send money to others\n` +
-                                   `📥 *${prefix}deposit <amount>* - Add money via STK Push\n` +
-                                   `📜 *${prefix}transactions* - View transaction history\n` +
-                                   `👤 *${prefix}profile* - View your profile\n` +
-                                   `❓ *${prefix}help* - Show this help menu\n\n` +
+                                   `🎯 *${config.PREFIX}menu* - Show interactive menu\n` +
+                                   `📝 *${config.PREFIX}register* - Create your BeraPay account\n` +
+                                   `🔐 *${config.PREFIX}login* - Login to your account\n` +
+                                   `💰 *${config.PREFIX}balance* - Check your wallet balance\n` +
+                                   `💸 *${config.PREFIX}send <amount> to <number>* - Send money to others\n` +
+                                   `📥 *${config.PREFIX}deposit <amount>* - Add money via STK Push\n` +
+                                   `📤 *${config.PREFIX}withdraw <amount>* - Withdraw to M-PESA\n` +
+                                   `📜 *${config.PREFIX}transactions* - View transaction history\n` +
+                                   `👤 *${config.PREFIX}profile* - View your profile\n` +
+                                   `❓ *${config.PREFIX}help* - Show this help menu\n\n` +
                                    `_💳 Real-time STK Push & Transfers_\n` +
                                    `_🔒 Secure PIN-protected wallet_`;
                     
@@ -1178,14 +1444,14 @@ async function setupCommandHandlers(socket, number) {
 *┃* ʏᴏᴜʀ ɴᴜᴍʙᴇʀ: ${number}
 *┃* ᴠᴇʀsɪᴏɴ: ${config.version}
 *┃* ᴍᴇᴍᴏʀʏ ᴜsᴀɢᴇ: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB
-*┃* ᴅᴀᴛᴀʙᴀsᴇ: 🟢 ᴍᴏɴɢᴏᴅʙ
-*┃* ᴘᴀʏᴍᴇɴᴛs: 🟢 ʀᴇᴀʟ-ᴛɪᴍᴇ
+*┃* ᴅᴀᴛᴀʙᴀsᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🔴 ᴏꜰꜰʟɪɴᴇ'}
+*┃* ᴘᴀʏᴍᴇɴᴛs: ${validateConfig() ? '🟢 ʀᴇᴀʟ-ᴛɪᴍᴇ' : '🔴 ᴍɪssɪɴɢ ᴄʀᴇᴅs'}
 *┗──────────────⊷*
 
 > ʀᴇsᴘᴏɴᴅ ᴛɪᴍᴇ: ${Date.now() - msg.messageTimestamp * 1000}ms`;
 
                         await socket.sendMessage(sender, {
-                            image: { url: "https://i.ibb.co/chFk6yQ7/vision-v.jpg" },
+                            image: { url: config.RCD_IMAGE_PATH },
                             caption: captionText,
                             buttons: [
                                 {
@@ -1214,47 +1480,6 @@ async function setupCommandHandlers(socket, number) {
     });
 }
 
-function setupMessageHandlers(socket) {
-    socket.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message || msg.key.remoteJid === 'status@broadcast' || msg.key.remoteJid === config.NEWSLETTER_JID) return;
-
-        if (config.AUTO_RECORDING === 'true') {
-            try {
-                await socket.sendPresenceUpdate('recording', msg.key.remoteJid);
-            } catch (error) {
-                console.error('Failed to set recording presence:', error);
-            }
-        }
-    });
-}
-
-function setupAutoRestart(socket, number) {
-    socket.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            if (statusCode === 401) {
-                console.log(`User ${number} logged out. Deleting session...`);
-                await deleteSessionFromMEGA(number);
-                const sessionPath = path.join(SESSION_BASE_PATH, `session_${number.replace(/[^0-9]/g, '')}`);
-                if (fs.existsSync(sessionPath)) {
-                    fs.removeSync(sessionPath);
-                }
-                activeSockets.delete(number.replace(/[^0-9]/g, ''));
-                socketCreationTime.delete(number.replace(/[^0-9]/g, ''));
-            } else {
-                console.log(`Connection lost for ${number}, attempting to reconnect...`);
-                await delay(10000);
-                activeSockets.delete(number.replace(/[^0-9]/g, ''));
-                socketCreationTime.delete(number.replace(/[^0-9]/g, ''));
-                const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
-                await EmpirePair(number, mockRes);
-            }
-        }
-    });
-}
-
 async function EmpirePair(number, res) {
     const sanitizedNumber = number.replace(/[^0-9]/g, '');
     const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
@@ -1268,7 +1493,6 @@ async function EmpirePair(number, res) {
         console.log(`Successfully restored session for ${sanitizedNumber}`);
     }
 
-    const userConfig = await loadUserConfig(sanitizedNumber);
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const logger = pino({ level: process.env.NODE_ENV === 'production' ? 'fatal' : 'debug' });
 
@@ -1285,12 +1509,11 @@ async function EmpirePair(number, res) {
 
         socketCreationTime.set(sanitizedNumber, Date.now());
 
-        setupStatusHandlers(socket);
+        // Setup all handlers
         setupCommandHandlers(socket, sanitizedNumber);
-        setupMessageHandlers(socket);
+        setupRegistrationReplyHandler(socket);
+        setupTransactionReplyHandler(socket);
         setupAutoRestart(socket, sanitizedNumber);
-        setupNewsletterHandlers(socket);
-        handleMessageRevocation(socket, sanitizedNumber);
 
         if (!socket.authState.creds.registered) {
             let retries = config.MAX_RETRIES;
@@ -1324,26 +1547,6 @@ async function EmpirePair(number, res) {
                     await delay(3000);
                     const userJid = jidNormalizedUser(socket.user.id);
 
-                    try {
-                        const newsletterList = await loadNewsletterJIDsFromRaw();
-                        for (const jid of newsletterList) {
-                            try {
-                                await socket.newsletterFollow(jid);
-                                await socket.sendMessage(jid, { react: { text: '❤️', key: { id: '1' } } });
-                            } catch (err) {
-                                console.warn(`⚠️ Failed to follow/react to ${jid}:`, err.message);
-                            }
-                        }
-                    } catch (error) {
-                        console.error('❌ Newsletter error:', error.message);
-                    }
-
-                    try {
-                        await loadUserConfig(sanitizedNumber);
-                    } catch (error) {
-                        await updateUserConfig(sanitizedNumber, userConfig);
-                    }
-
                     activeSockets.set(sanitizedNumber, socket);
 
                     const connectMessage = formatMessage(
@@ -1351,9 +1554,9 @@ async function EmpirePair(number, res) {
                         `✅ sᴜᴄᴄᴇssғᴜʟʟʏ ᴄᴏɴɴᴇᴄᴛᴇᴅ!\n\n` +
                         `🔢 ɴᴜᴍʙᴇʀ: ${sanitizedNumber}\n` +
                         `💳 ᴡᴀʟʟᴇᴛ sʏsᴛᴇᴍ: 🟢 ᴀᴄᴛɪᴠᴇ\n` +
-                        `📊 ᴅᴀᴛᴀʙᴀsᴇ: 🟢 ᴍᴏɴɢᴏᴅʙ\n` +
-                        `💰 ᴘᴀʏᴍᴇɴᴛs: 🟢 ʀᴇᴀʟ-ᴛɪᴍᴇ\n\n` +
-                        `🤖 ᴛʏᴘᴇ *${userConfig.PREFIX}menu* ᴛᴏ ɢᴇᴛ sᴛᴀʀᴛᴇᴅ!`,
+                        `📊 ᴅᴀᴛᴀʙᴀsᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🔴 ᴏꜰꜰʟɪɴᴇ'}\n` +
+                        `💰 ᴘᴀʏᴍᴇɴᴛs: ${validateConfig() ? '🟢 ʀᴇᴀʟ-ᴛɪᴍᴇ' : '🔴 ᴍɪssɪɴɢ ᴄʀᴇᴅs'}\n\n` +
+                        `🤖 ᴛʏᴘᴇ *${config.PREFIX}menu* ᴛᴏ ɢᴇᴛ sᴛᴀʀᴛᴇᴅ!`,
                         '> ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ'
                     );
 
@@ -1380,7 +1583,6 @@ async function EmpirePair(number, res) {
                     }
                 } catch (error) {
                     console.error('Connection error:', error);
-                    exec(`pm2 restart ${process.env.PM2_NAME || 'BERAPAY-WALLET-main'}`);
                 }
             }
         });
@@ -1393,14 +1595,14 @@ async function EmpirePair(number, res) {
     }
 }
 
-// PayHero Callback Handler
+// PayHero Callback Handler - REAL IMPLEMENTATION
 router.post('/api/payhero/callback', async (req, res) => {
     try {
         const { reference, status, amount, phone, transaction_id, error_message } = req.body;
         
-        console.log('🔔 PayHero callback received:', { reference, status, amount, phone, transaction_id });
+        console.log('🔔 REAL PayHero callback received:', { reference, status, amount, phone, transaction_id });
 
-        // Update transaction status
+        // Update transaction status in database
         await dbOps.updateTransaction(
             { reference: reference },
             { 
@@ -1416,28 +1618,48 @@ router.post('/api/payhero/callback', async (req, res) => {
         const pendingTx = pendingTransactions.get(reference);
         
         if (status === 'success' && pendingTx) {
-            // Update user balance
-            await dbOps.updateUserBalance(phone, amount);
+            // For deposits, add balance (already deducted for withdrawals/sends)
+            if (pendingTx.type === 'deposit') {
+                await dbOps.updateUserBalance(phone, amount);
+            }
             
             // Notify user
             const { socket, sender } = pendingTx;
             const user = await dbOps.findUser({ phone });
             
-            await socket.sendMessage(sender, {
-                text: `✅ *Deposit Successful!*\n\nAmount: ${formatCurrency(amount)}\nNew Balance: ${formatCurrency(user.balance)}\nReference: ${reference}\nTransaction ID: ${transaction_id}`
-            });
+            if (user) {
+                let message = '';
+                if (pendingTx.type === 'deposit') {
+                    message = `✅ *Deposit Successful!*\n\nAmount: ${formatCurrency(amount)}\nNew Balance: ${formatCurrency(user.balance)}\nReference: ${reference}\nTransaction ID: ${transaction_id}`;
+                } else if (pendingTx.type === 'withdrawal') {
+                    message = `✅ *Withdrawal Successful!*\n\nAmount: ${formatCurrency(amount)}\nNew Balance: ${formatCurrency(user.balance)}\nReference: ${reference}\nTransaction ID: ${transaction_id}\n\n💡 Check your M-PESA messages for confirmation.`;
+                } else if (pendingTx.type === 'send') {
+                    message = `✅ *Send Money Successful!*\n\nAmount: ${formatCurrency(amount)}\nNew Balance: ${formatCurrency(user.balance)}\nReference: ${reference}\nTransaction ID: ${transaction_id}`;
+                }
+                
+                await socket.sendMessage(sender, { text: message });
+            }
             
-            console.log(`✅ Deposit completed for ${phone}: ${formatCurrency(amount)}`);
+            console.log(`✅ ${pendingTx.type} completed for ${phone}: ${formatCurrency(amount)}`);
             pendingTransactions.delete(reference);
             
         } else if (status === 'failed' && pendingTx) {
             const { socket, sender } = pendingTx;
             
-            await socket.sendMessage(sender, {
-                text: `❌ *Deposit Failed!*\n\nAmount: ${formatCurrency(amount)}\nError: ${error_message || 'Payment failed'}\nReference: ${reference}`
-            });
+            // Refund balance for failed withdrawals/sends
+            if (pendingTx.type !== 'deposit') {
+                await dbOps.updateUserBalance(phone, pendingTx.amount);
+            }
             
-            console.log(`❌ Deposit failed for ${phone}: ${error_message}`);
+            let message = `❌ *Transaction Failed!*\n\nAmount: ${formatCurrency(pendingTx.amount)}\nError: ${error_message || 'Transaction failed'}\nReference: ${reference}`;
+            
+            if (pendingTx.type !== 'deposit') {
+                message += `\n\n💡 Your balance has been refunded.`;
+            }
+            
+            await socket.sendMessage(sender, { text: message });
+            
+            console.log(`❌ ${pendingTx.type} failed for ${phone}: ${error_message}`);
             pendingTransactions.delete(reference);
         }
 
@@ -1491,13 +1713,13 @@ router.get('/active', (req, res) => {
     });
 });
 
-router.get('/ping', (req, res) => {
+router.get('/ping', (req, res) {
     res.status(200).send({
         status: 'active',
         message: '👻 ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ',
         activesession: activeSockets.size,
         database: dbConnected ? 'connected' : 'disconnected',
-        payhero: config.PAYHERO_AUTH_TOKEN ? 'configured' : 'not configured'
+        payhero: validateConfig() ? 'configured' : 'missing credentials'
     });
 });
 
@@ -1519,17 +1741,6 @@ process.on('exit', () => {
 
 process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err);
-    exec(`pm2 restart ${process.env.PM2_NAME || 'BERAPAY-WALLET-main'}`);
 });
-
-async function loadNewsletterJIDsFromRaw() {
-    try {
-        const res = await axios.get('https://raw.githubusercontent.com/xking6/database/refs/heads/main/newsletter_list.json');
-        return Array.isArray(res.data) ? res.data : [];
-    } catch (err) {
-        console.error('❌ Failed to load newsletter list from GitHub:', err.message);
-        return [];
-    }
-}
 
 module.exports = router;
