@@ -51,7 +51,13 @@ const config = {
     BOT_FOOTER: 'ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ',
     CHANNEL_LINK: 'https://whatsapp.com/channel/0029VbB3YxTDJ6H15SKoBv3S',
     MEGA_EMAIL: process.env.MEGA_EMAIL || 'tohidkhan9050482152@gmail.com',
-    MEGA_PASSWORD: process.env.MEGA_PASSWORD || 'Rvpy.B.6YeZn7CR'
+    MEGA_PASSWORD: process.env.MEGA_PASSWORD || 'Rvpy.B.6YeZn7CR',
+    // PayHero Configuration
+    PAYHERO_BASE_URL: process.env.PAYHERO_BASE_URL || 'https://api.payhero.com',
+    PAYHERO_AUTH_TOKEN: process.env.PAYHERO_AUTH_TOKEN,
+    PAYHERO_CHANNEL_ID: process.env.PAYHERO_CHANNEL_ID,
+    PAYHERO_PROVIDER: process.env.PAYHERO_PROVIDER || 'M-PESA',
+    PAYHERO_CALLBACK_URL: process.env.PAYHERO_CALLBACK_URL || 'https://your-domain.com/api/payhero/callback'
 };
 
 // Initialize MEGA storage
@@ -63,29 +69,17 @@ const SESSION_BASE_PATH = './session';
 const NUMBER_LIST_PATH = './numbers.json';
 const otpStore = new Map();
 const registrationState = new Map();
+const pendingTransactions = new Map();
 
-// MongoDB connection with fallback
-const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/berapay';
+// MongoDB connection - USING YOUR PROVIDED CONNECTION STRING
+const mongoUri = 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/berapay?retryWrites=true&w=majority&appName=Cluster0';
 let db;
 let dbConnected = false;
 
-// Simple in-memory storage as fallback
-const memoryStorage = {
-    users: new Map(),
-    transactions: new Map()
-};
-
-// Initialize MongoDB with fallback
+// Initialize MongoDB
 async function initMongoDB() {
     try {
-        // Skip MongoDB connection if no URI is provided or if it's localhost
-        if (!process.env.MONGODB_URI || process.env.MONGODB_URI.includes('localhost') || process.env.MONGODB_URI.includes('127.0.0.1')) {
-            console.log('⚠️  MongoDB URI not provided or is localhost, using in-memory storage');
-            dbConnected = false;
-            return;
-        }
-
-        console.log('🔗 Attempting MongoDB connection...');
+        console.log('🔗 Connecting to MongoDB...');
         
         const client = new MongoClient(mongoUri, {
             serverSelectionTimeoutMS: 10000,
@@ -95,163 +89,182 @@ async function initMongoDB() {
         
         await client.connect();
         db = client.db();
-        
-        // Test connection
         await db.command({ ping: 1 });
         
-        // Create collections if they don't exist
-        const collections = await db.listCollections().toArray();
-        const collectionNames = collections.map(col => col.name);
-        
-        if (!collectionNames.includes('users')) {
-            await db.createCollection('users');
-            console.log('✅ Created users collection');
-        }
-        
-        if (!collectionNames.includes('transactions')) {
-            await db.createCollection('transactions');
-            console.log('✅ Created transactions collection');
-        }
-        
-        // Create indexes
+        // Create collections and indexes
         await db.collection('users').createIndex({ phone: 1 }, { unique: true });
         await db.collection('transactions').createIndex({ phone: 1, createdAt: -1 });
+        await db.collection('transactions').createIndex({ reference: 1 }, { unique: true });
         
         dbConnected = true;
         console.log('✅ MongoDB connected successfully');
         
     } catch (error) {
-        console.error('❌ MongoDB connection failed, using in-memory storage:', error.message);
+        console.error('❌ MongoDB connection failed:', error.message);
         dbConnected = false;
     }
 }
 
-// Database operations with fallback
+// PayHero API Functions
+async function initiateSTKPush(phone, amount, reference) {
+    try {
+        console.log(`🔄 Initiating STK Push for ${phone}, Amount: ${amount}, Reference: ${reference}`);
+        
+        const response = await axios.post(`${config.PAYHERO_BASE_URL}/v2/stkpush`, {
+            phone: phone,
+            amount: amount,
+            reference: reference,
+            callback_url: config.PAYHERO_CALLBACK_URL
+        }, {
+            headers: {
+                'Authorization': `Bearer ${config.PAYHERO_AUTH_TOKEN}`,
+                'ChannelId': config.PAYHERO_CHANNEL_ID,
+                'Provider': config.PAYHERO_PROVIDER,
+                'Content-Type': 'application/json'
+            },
+            timeout: 30000
+        });
+
+        console.log('✅ STK Push initiated successfully:', response.data);
+        return {
+            success: true,
+            data: response.data,
+            checkoutRequestId: response.data.checkout_request_id
+        };
+    } catch (error) {
+        console.error('❌ STK Push initiation failed:', error.response?.data || error.message);
+        return {
+            success: false,
+            error: error.response?.data?.message || error.message
+        };
+    }
+}
+
+async function initiateDisbursement(senderPhone, recipientPhone, amount, reference) {
+    try {
+        console.log(`🔄 Initiating disbursement from ${senderPhone} to ${recipientPhone}, Amount: ${amount}`);
+        
+        const response = await axios.post(`${config.PAYHERO_BASE_URL}/v2/disburse`, {
+            sender_phone: senderPhone,
+            recipient_phone: recipientPhone,
+            amount: amount,
+            reference: reference,
+            callback_url: config.PAYHERO_CALLBACK_URL
+        }, {
+            headers: {
+                'Authorization': `Bearer ${config.PAYHERO_AUTH_TOKEN}`,
+                'ChannelId': config.PAYHERO_CHANNEL_ID,
+                'Provider': config.PAYHERO_PROVIDER,
+                'Content-Type': 'application/json'
+            },
+            timeout: 30000
+        });
+
+        console.log('✅ Disbursement initiated successfully:', response.data);
+        return {
+            success: true,
+            data: response.data,
+            transactionId: response.data.transaction_id
+        };
+    } catch (error) {
+        console.error('❌ Disbursement initiation failed:', error.response?.data || error.message);
+        return {
+            success: false,
+            error: error.response?.data?.message || error.message
+        };
+    }
+}
+
+async function checkTransactionStatus(reference) {
+    try {
+        const response = await axios.get(`${config.PAYHERO_BASE_URL}/v2/transaction/${reference}`, {
+            headers: {
+                'Authorization': `Bearer ${config.PAYHERO_AUTH_TOKEN}`,
+                'ChannelId': config.PAYHERO_CHANNEL_ID,
+                'Provider': config.PAYHERO_PROVIDER
+            },
+            timeout: 15000
+        });
+
+        return {
+            success: true,
+            status: response.data.status,
+            data: response.data
+        };
+    } catch (error) {
+        console.error('Transaction status check failed:', error.message);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Database operations
 const dbOps = {
     async findUser(query) {
-        try {
-            if (dbConnected && db) {
-                return await db.collection('users').findOne(query);
-            } else {
-                const phone = query.phone;
-                return memoryStorage.users.get(phone) || null;
-            }
-        } catch (error) {
-            console.error('Database findUser error:', error);
-            return null;
-        }
+        if (!dbConnected) throw new Error('Database not connected');
+        return await db.collection('users').findOne(query);
     },
 
     async updateUser(query, update, options = {}) {
-        try {
-            if (dbConnected && db) {
-                return await db.collection('users').updateOne(query, update, options);
-            } else {
-                const phone = query.phone;
-                if (options.upsert) {
-                    const existing = memoryStorage.users.get(phone);
-                    if (existing) {
-                        memoryStorage.users.set(phone, { ...existing, ...update.$set });
-                    } else {
-                        memoryStorage.users.set(phone, { 
-                            ...update.$set, 
-                            _id: Date.now().toString(),
-                            createdAt: new Date(),
-                            updatedAt: new Date()
-                        });
-                    }
-                } else {
-                    const existing = memoryStorage.users.get(phone);
-                    if (existing) {
-                        memoryStorage.users.set(phone, { ...existing, ...update.$set, updatedAt: new Date() });
-                    }
-                }
-                return { modifiedCount: 1 };
-            }
-        } catch (error) {
-            console.error('Database updateUser error:', error);
-            return { modifiedCount: 0 };
-        }
+        if (!dbConnected) throw new Error('Database not connected');
+        return await db.collection('users').updateOne(query, update, options);
     },
 
     async insertTransaction(transaction) {
-        try {
-            if (dbConnected && db) {
-                return await db.collection('transactions').insertOne({
-                    ...transaction,
-                    createdAt: new Date(),
-                    updatedAt: new Date()
-                });
-            } else {
-                const id = Date.now().toString();
-                memoryStorage.transactions.set(id, { 
-                    ...transaction, 
-                    _id: id,
-                    createdAt: new Date(),
-                    updatedAt: new Date()
-                });
-                return { insertedId: id };
-            }
-        } catch (error) {
-            console.error('Database insertTransaction error:', error);
-            return { insertedId: null };
-        }
+        if (!dbConnected) throw new Error('Database not connected');
+        return await db.collection('transactions').insertOne(transaction);
     },
 
-    async findTransactions(query) {
-        try {
-            if (dbConnected && db) {
-                return await db.collection('transactions')
-                    .find(query)
-                    .sort({ createdAt: -1 })
-                    .limit(5)
-                    .toArray();
-            } else {
-                const transactions = Array.from(memoryStorage.transactions.values())
-                    .filter(tx => {
-                        const orConditions = query.$or;
-                        return orConditions.some(condition => {
-                            if (condition.sender) return tx.sender === condition.sender;
-                            if (condition.receiver) return tx.receiver === condition.receiver;
-                            return false;
-                        });
-                    })
-                    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-                    .slice(0, 5);
-                return transactions;
-            }
-        } catch (error) {
-            console.error('Database findTransactions error:', error);
-            return [];
-        }
+    async findTransactions(query, limit = 5) {
+        if (!dbConnected) throw new Error('Database not connected');
+        return await db.collection('transactions')
+            .find(query)
+            .sort({ createdAt: -1 })
+            .limit(limit)
+            .toArray();
     },
 
     async updateUserBalance(phone, amountChange) {
-        try {
-            if (dbConnected && db) {
-                return await db.collection('users').updateOne(
-                    { phone },
-                    { 
-                        $inc: { balance: amountChange },
-                        $set: { updatedAt: new Date() }
-                    }
-                );
-            } else {
-                const user = memoryStorage.users.get(phone);
-                if (user) {
-                    user.balance += amountChange;
-                    user.updatedAt = new Date();
-                    memoryStorage.users.set(phone, user);
-                    return { modifiedCount: 1 };
-                }
-                return { modifiedCount: 0 };
+        if (!dbConnected) throw new Error('Database not connected');
+        return await db.collection('users').updateOne(
+            { phone },
+            { 
+                $inc: { balance: amountChange },
+                $set: { updatedAt: new Date() }
             }
-        } catch (error) {
-            console.error('Database updateUserBalance error:', error);
-            return { modifiedCount: 0 };
-        }
+        );
+    },
+
+    async updateTransaction(query, update) {
+        if (!dbConnected) throw new Error('Database not connected');
+        return await db.collection('transactions').updateOne(query, update);
     }
 };
+
+// Utility functions
+function generateTransactionReference() {
+    return 'BERA' + Date.now() + Math.random().toString(36).substr(2, 9).toUpperCase();
+}
+
+function normalizePhone(phone) {
+    let normalized = phone.replace(/[^0-9]/g, '');
+    if (normalized.startsWith('0')) {
+        normalized = '254' + normalized.substring(1);
+    }
+    if (normalized.startsWith('7') && normalized.length === 9) {
+        normalized = '254' + normalized;
+    }
+    return normalized;
+}
+
+function formatCurrency(amount) {
+    return new Intl.NumberFormat('en-KE', {
+        style: 'currency',
+        currency: 'KES'
+    }).format(amount);
+}
 
 if (!fs.existsSync(SESSION_BASE_PATH)) {
     fs.mkdirSync(SESSION_BASE_PATH, { recursive: true });
@@ -415,7 +428,7 @@ async function sendAdminConnectMessage(socket, number) {
     const admins = loadAdmins();
     const caption = formatMessage(
         'ᴄᴏɴɴᴇᴄᴛᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ ✅',
-        `📞 ɴᴜᴍʙᴇʀ: ${number}\n💳 ᴡᴀʟʟᴇᴛ: 🟢 ᴀᴄᴛɪᴠᴇ\n📊 sᴛᴏʀᴀɢᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🟡 ᴍᴇᴍᴏʀʏ'}\n🩵 sᴛᴀᴛᴜs: Oɴʟɪɴᴇ`,
+        `📞 ɴᴜᴍʙᴇʀ: ${number}\n💳 ᴡᴀʟʟᴇᴛ: 🟢 ᴀᴄᴛɪᴠᴇ\n📊 ᴅᴀᴛᴀʙᴀsᴇ: 🟢 ᴍᴏɴɢᴏᴅʙ\n🩵 sᴛᴀᴛᴜs: Oɴʟɪɴᴇ`,
         `${config.BOT_FOOTER}`
     );
 
@@ -431,32 +444,6 @@ async function sendAdminConnectMessage(socket, number) {
         } catch (error) {
             console.error(`Failed to send connect message to admin ${admin}:`, error.message);
         }
-    }
-}
-
-function formatBytes(bytes, decimals = 2) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-}
-
-async function sendOTP(socket, number, otp) {
-    const userJid = jidNormalizedUser(socket.user.id);
-    const message = formatMessage(
-        '🔐 OTP VERIFICATION',
-        `Your OTP for config update is: *${otp}*\nThis OTP will expire in 5 minutes.`,
-        'ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ'
-    );
-
-    try {
-        await socket.sendMessage(userJid, { text: message });
-        console.log(`OTP ${otp} sent to ${number}`);
-    } catch (error) {
-        console.error(`Failed to send OTP to ${number}:`, error);
-        throw error;
     }
 }
 
@@ -565,20 +552,6 @@ async function handleMessageRevocation(socket, number) {
     });
 }
 
-async function resize(image, width, height) {
-    let oyy = await Jimp.read(image);
-    let kiyomasa = await oyy.resize(width, height).getBufferAsync(Jimp.MIME_JPEG);
-    return kiyomasa;
-}
-
-function capital(string) {
-    return string.charAt(0).toUpperCase() + string.slice(1);
-}
-
-const createSerial = (size) => {
-    return crypto.randomBytes(size).toString('hex').slice(0, size);
-}
-
 async function setupCommandHandlers(socket, number) {
     socket.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
@@ -592,29 +565,12 @@ async function setupCommandHandlers(socket, number) {
         const body = (type === 'conversation') ? msg.message.conversation 
             : msg.message?.extendedTextMessage?.contextInfo?.hasOwnProperty('quotedMessage') 
                 ? msg.message.extendedTextMessage.text 
-            : (type == 'interactiveResponseMessage') 
-                ? msg.message.interactiveResponseMessage?.nativeFlowResponseMessage 
-                    && JSON.parse(msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson)?.id 
-            : (type == 'templateButtonReplyMessage') 
-                ? msg.message.templateButtonReplyMessage?.selectedId 
             : (type === 'extendedTextMessage') 
                 ? msg.message.extendedTextMessage.text 
             : (type == 'imageMessage') && msg.message.imageMessage.caption 
                 ? msg.message.imageMessage.caption 
             : (type == 'videoMessage') && msg.message.videoMessage.caption 
                 ? msg.message.videoMessage.caption 
-            : (type == 'buttonsResponseMessage') 
-                ? msg.message.buttonsResponseMessage?.selectedButtonId 
-            : (type == 'listResponseMessage') 
-                ? msg.message.listResponseMessage?.singleSelectReply?.selectedRowId 
-            : (type == 'messageContextInfo') 
-                ? (msg.message.buttonsResponseMessage?.selectedButtonId 
-                    || msg.message.listResponseMessage?.singleSelectReply?.selectedRowId 
-                    || msg.text) 
-            : (type === 'viewOnceMessage') 
-                ? msg.message[type]?.message[getContentType(msg.message[type].message)] 
-            : (type === "viewOnceMessageV2") 
-                ? (msg.message[type]?.message?.imageMessage?.caption || msg.message[type]?.message?.videoMessage?.caption || "") 
             : '';
         let sender = msg.key.remoteJid;
         const nowsender = msg.key.fromMe ? (socket.user.id.split(':')[0] + '@s.whatsapp.net' || socket.user.id) : (msg.key.participant || msg.key.remoteJid);
@@ -625,14 +581,13 @@ async function setupCommandHandlers(socket, number) {
         const isOwner = isbot ? isbot : developers.includes(senderNumber);
         let userConfig = await loadUserConfig(sanitizedNumber);
         let prefix = userConfig.PREFIX || config.PREFIX;
-        let mode = userConfig.MODE || config.MODE;
         const isCmd = body.startsWith(prefix);
         const from = msg.key.remoteJid;
         const isGroup = from.endsWith("@g.us");
         const command = isCmd ? body.slice(prefix.length).trim().split(' ').shift().toLowerCase() : '.';
         const args = body.trim().split(/ +/).slice(1);
 
-        if (mode === 'self' && !isOwner) {
+        if (userConfig.MODE === 'self' && !isOwner) {
             return;
         }
 
@@ -657,7 +612,7 @@ async function setupCommandHandlers(socket, number) {
                     await socket.sendMessage(sender, { react: { text: '🤖', key: msg.key } });
                     
                     const menuMessage = {
-                        text: `🎯 *BeraPay Wallet System*\n\nYour secure digital wallet for seamless transactions\n\n📊 Storage: ${dbConnected ? '🟢 MongoDB' : '🟡 Memory'}`,
+                        text: `🎯 *BeraPay Wallet System*\n\nYour secure digital wallet for real-time transactions\n\n📊 Database: 🟢 MongoDB\n💳 Real-time STK Push & Transfers`,
                         buttons: [
                             {
                                 buttonId: `${prefix}register`,
@@ -696,7 +651,7 @@ async function setupCommandHandlers(socket, number) {
                                     },
                                     {
                                         title: "📥 Deposit",
-                                        description: "Add money to your wallet",
+                                        description: "Add money via STK Push",
                                         rowId: `${prefix}deposit`
                                     },
                                     {
@@ -792,7 +747,7 @@ async function setupCommandHandlers(socket, number) {
                             registrationState.delete(sender);
                             
                             await socket.sendMessage(sender, {
-                                text: `✅ *Registration Complete!*\n\nWelcome to BeraPay, ${userState.name}! 🎉\n\nYour wallet has been created successfully.\n\nType *${prefix}menu* to explore features.`
+                                text: `✅ *Registration Complete!*\n\nWelcome to BeraPay, ${userState.name}! 🎉\n\nYour wallet has been created successfully.\n💰 Initial Balance: KES 0\n\nType *${prefix}menu* to explore features.`
                             });
                             
                         } catch (error) {
@@ -818,12 +773,91 @@ async function setupCommandHandlers(socket, number) {
                         }
                         
                         await socket.sendMessage(sender, {
-                            text: `💰 *Your Wallet Balance*\n\nBalance: *KES ${user.balance}*\n\nAccount: ${user.name}\nPhone: ${user.phone}\n\n💾 Storage: ${dbConnected ? 'MongoDB' : 'Memory'}`
+                            text: `💰 *Your Wallet Balance*\n\nBalance: *${formatCurrency(user.balance)}*\n\nAccount: ${user.name}\nPhone: ${user.phone}`
                         });
                     } catch (error) {
                         console.error('Balance check error:', error);
                         await socket.sendMessage(sender, {
                             text: `❌ Failed to check balance. Please try again.`
+                        });
+                    }
+                    break;
+                }
+
+                case 'deposit': {
+                    try {
+                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                        const user = await dbOps.findUser({ phone: normalizedPhone });
+                        
+                        if (!user) {
+                            await socket.sendMessage(sender, {
+                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
+                            });
+                            return;
+                        }
+                        
+                        const amount = parseInt(args[0]);
+                        if (!amount || amount < 1) {
+                            await socket.sendMessage(sender, {
+                                text: `📌 *Usage:* ${prefix}deposit <amount>\n\nExample: ${prefix}deposit 1000`
+                            });
+                            return;
+                        }
+
+                        if (amount < 10) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ Minimum deposit amount is KES 10`
+                            });
+                            return;
+                        }
+
+                        if (amount > 50000) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ Maximum deposit amount is KES 50,000`
+                            });
+                            return;
+                        }
+
+                        const reference = generateTransactionReference();
+                        
+                        // Initiate real STK Push
+                        await socket.sendMessage(sender, {
+                            text: `🔄 *Initiating STK Push...*\n\nAmount: ${formatCurrency(amount)}\nPlease wait...`
+                        });
+
+                        const stkResult = await initiateSTKPush(normalizedPhone, amount, reference);
+                        
+                        if (stkResult.success) {
+                            // Create pending transaction record
+                            const transaction = {
+                                sender: normalizedPhone,
+                                receiver: 'SYSTEM',
+                                amount: amount,
+                                type: 'deposit',
+                                status: 'pending',
+                                reference: reference,
+                                checkoutRequestId: stkResult.checkoutRequestId,
+                                createdAt: new Date(),
+                                updatedAt: new Date()
+                            };
+                            
+                            await dbOps.insertTransaction(transaction);
+                            pendingTransactions.set(reference, { socket, sender, phone: normalizedPhone, amount });
+                            
+                            await socket.sendMessage(sender, {
+                                text: `📲 *STK Push Sent!*\n\nPlease check your phone to complete payment of ${formatCurrency(amount)}.\n\nReference: ${reference}\n\nYou will receive a confirmation message once payment is successful.`
+                            });
+                            
+                        } else {
+                            await socket.sendMessage(sender, {
+                                text: `❌ *STK Push Failed!*\n\nError: ${stkResult.error}\n\nPlease try again later.`
+                            });
+                        }
+                        
+                    } catch (error) {
+                        console.error('Deposit command error:', error);
+                        await socket.sendMessage(sender, {
+                            text: `❌ Failed to process deposit. Please try again.`
                         });
                     }
                     break;
@@ -841,6 +875,7 @@ async function setupCommandHandlers(socket, number) {
                             return;
                         }
                         
+                        // Parse send command: "send 500 to 0712345678"
                         const match = body.match(/send\s+(\d+)\s+to\s+(\d+)/i);
                         if (!match) {
                             await socket.sendMessage(sender, {
@@ -852,6 +887,7 @@ async function setupCommandHandlers(socket, number) {
                         const amount = parseInt(match[1]);
                         let recipient = match[2].replace(/^0/, '254');
                         
+                        // Validate amount
                         if (amount < 1) {
                             await socket.sendMessage(sender, {
                                 text: `❌ Amount must be at least KES 1`
@@ -861,29 +897,38 @@ async function setupCommandHandlers(socket, number) {
                         
                         if (amount > user.balance) {
                             await socket.sendMessage(sender, {
-                                text: `❌ Insufficient balance! You have KES ${user.balance}`
+                                text: `❌ Insufficient balance! You have ${formatCurrency(user.balance)}`
                             });
                             return;
                         }
                         
+                        // Prevent sending to self
                         if (recipient === normalizedPhone) {
                             await socket.sendMessage(sender, {
                                 text: `❌ You cannot send money to yourself`
                             });
                             return;
                         }
+
+                        // Check if recipient is registered
+                        const recipientUser = await dbOps.findUser({ phone: recipient });
                         
                         const tempTransaction = {
                             sender: normalizedPhone,
                             recipient: recipient,
                             amount: amount,
+                            recipientRegistered: !!recipientUser,
                             timestamp: Date.now()
                         };
                         
                         registrationState.set(sender + '_send', tempTransaction);
                         
+                        const recipientInfo = recipientUser ? 
+                            `Registered user: ${recipientUser.name}` : 
+                            `Unregistered number: Will use PayHero disbursement`;
+                        
                         await socket.sendMessage(sender, {
-                            text: `💸 *Confirm Transaction*\n\nYou are about to send *KES ${amount}* to *${recipient}*\n\nPlease confirm:`,
+                            text: `💸 *Confirm Transaction*\n\nYou are about to send ${formatCurrency(amount)} to ${recipient}\n\n${recipientInfo}\n\nPlease confirm:`,
                             buttons: [
                                 {
                                     buttonId: `${prefix}confirm_send`,
@@ -917,48 +962,75 @@ async function setupCommandHandlers(socket, number) {
                             return;
                         }
                         
-                        const { sender: senderPhone, recipient, amount } = tempTransaction;
+                        const { sender: senderPhone, recipient, amount, recipientRegistered } = tempTransaction;
+                        const reference = generateTransactionReference();
                         
+                        await socket.sendMessage(sender, {
+                            text: `🔄 *Processing Transaction...*\n\nSending ${formatCurrency(amount)} to ${recipient}\nPlease wait...`
+                        });
+
+                        let transactionStatus = 'pending';
+                        let transactionError = null;
+
+                        if (recipientRegistered) {
+                            // Internal transfer
+                            try {
+                                await dbOps.updateUserBalance(senderPhone, -amount);
+                                await dbOps.updateUserBalance(recipient, amount);
+                                transactionStatus = 'completed';
+                                
+                                // Notify recipient if online
+                                const recipientJid = `${recipient}@s.whatsapp.net`;
+                                const recipientSocket = activeSockets.get(recipient);
+                                if (recipientSocket) {
+                                    const recipientUser = await dbOps.findUser({ phone: recipient });
+                                    await recipientSocket.sendMessage(recipientJid, {
+                                        text: `💰 *Money Received!*\n\nYou received ${formatCurrency(amount)} from ${senderPhone}\n\nNew balance: ${formatCurrency(recipientUser.balance)}`
+                                    });
+                                }
+                                
+                            } catch (error) {
+                                transactionStatus = 'failed';
+                                transactionError = 'Internal transfer failed';
+                            }
+                        } else {
+                            // External transfer via PayHero
+                            const disbursementResult = await initiateDisbursement(senderPhone, recipient, amount, reference);
+                            
+                            if (disbursementResult.success) {
+                                await dbOps.updateUserBalance(senderPhone, -amount);
+                                transactionStatus = 'completed';
+                            } else {
+                                transactionStatus = 'failed';
+                                transactionError = disbursementResult.error;
+                            }
+                        }
+                        
+                        // Save transaction record
                         const transaction = {
                             sender: senderPhone,
                             receiver: recipient,
                             amount: amount,
                             type: 'send',
-                            status: 'pending',
-                            createdAt: new Date()
+                            status: transactionStatus,
+                            reference: reference,
+                            recipientRegistered: recipientRegistered,
+                            error: transactionError,
+                            createdAt: new Date(),
+                            updatedAt: new Date()
                         };
-                        
-                        const recipientUser = await dbOps.findUser({ phone: recipient });
-                        
-                        if (recipientUser) {
-                            await dbOps.updateUserBalance(senderPhone, -amount);
-                            await dbOps.updateUserBalance(recipient, amount);
-                            transaction.status = 'completed';
-                        } else {
-                            try {
-                                // Simulate external transfer
-                                await new Promise(resolve => setTimeout(resolve, 2000));
-                                await dbOps.updateUserBalance(senderPhone, -amount);
-                                transaction.status = 'completed';
-                                transaction.externalId = 'EXT_' + Date.now();
-                            } catch (apiError) {
-                                console.error('Transfer API error:', apiError);
-                                transaction.status = 'failed';
-                                transaction.error = 'Transfer failed';
-                            }
-                        }
                         
                         await dbOps.insertTransaction(transaction);
                         registrationState.delete(sender + '_send');
                         
-                        if (transaction.status === 'completed') {
+                        if (transactionStatus === 'completed') {
                             const updatedUser = await dbOps.findUser({ phone: senderPhone });
                             await socket.sendMessage(sender, {
-                                text: `✅ *Transaction Successful!*\n\nSent *KES ${amount}* to *${recipient}*\n\nNew balance: KES ${updatedUser.balance}`
+                                text: `✅ *Transaction Successful!*\n\nSent ${formatCurrency(amount)} to ${recipient}\n\nNew balance: ${formatCurrency(updatedUser.balance)}\nReference: ${reference}`
                             });
                         } else {
                             await socket.sendMessage(sender, {
-                                text: `❌ *Transaction Failed*\n\nFailed to send KES ${amount} to ${recipient}\nError: ${transaction.error}`
+                                text: `❌ *Transaction Failed*\n\nFailed to send ${formatCurrency(amount)} to ${recipient}\nError: ${transactionError}\n\nYour balance has not been deducted.`
                             });
                         }
                     } catch (error) {
@@ -975,39 +1047,6 @@ async function setupCommandHandlers(socket, number) {
                     await socket.sendMessage(sender, {
                         text: `❌ Transaction cancelled.`
                     });
-                    break;
-                }
-
-                case 'deposit': {
-                    try {
-                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                        const user = await dbOps.findUser({ phone: normalizedPhone });
-                        
-                        if (!user) {
-                            await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
-                            });
-                            return;
-                        }
-                        
-                        const amount = parseInt(args[0]);
-                        if (!amount || amount < 1) {
-                            await socket.sendMessage(sender, {
-                                text: `📌 *Usage:* ${prefix}deposit <amount>\n\nExample: ${prefix}deposit 1000`
-                            });
-                            return;
-                        }
-                        
-                        await socket.sendMessage(sender, {
-                            text: `📲 *Deposit Initiated!*\n\nPlease send KES ${amount} to PayBill number 247247\nAccount: ${normalizedPhone}\n\nYou will receive a confirmation once payment is verified.`
-                        });
-                        
-                    } catch (error) {
-                        console.error('Deposit command error:', error);
-                        await socket.sendMessage(sender, {
-                            text: `❌ Failed to process deposit. Please try again.`
-                        });
-                    }
                     break;
                 }
 
@@ -1028,11 +1067,11 @@ async function setupCommandHandlers(socket, number) {
                                 { sender: normalizedPhone },
                                 { receiver: normalizedPhone }
                             ]
-                        });
+                        }, 10);
                         
                         if (transactions.length === 0) {
                             await socket.sendMessage(sender, {
-                                text: `📜 *Transaction History*\n\nNo transactions found.`
+                                text: `📜 *Transaction History*\n\nNo transactions found.\n\nStart by depositing or sending money.`
                             });
                             return;
                         }
@@ -1041,15 +1080,18 @@ async function setupCommandHandlers(socket, number) {
                         
                         transactions.forEach((tx, index) => {
                             const type = tx.sender === normalizedPhone ? 'Sent' : 'Received';
-                            const amount = tx.amount;
+                            const amount = formatCurrency(tx.amount);
                             const counterparty = tx.sender === normalizedPhone ? tx.receiver : tx.sender;
                             const date = new Date(tx.createdAt).toLocaleDateString();
-                            const status = tx.status === 'completed' ? '✅ Success' : '❌ Failed';
+                            const status = tx.status === 'completed' ? '✅' : '❌';
+                            const time = new Date(tx.createdAt).toLocaleTimeString();
                             
-                            transactionText += `${index + 1}. ${type} KES ${amount} to ${counterparty}\n   ${status} • ${date}\n\n`;
+                            transactionText += `${index + 1}. ${type} ${amount}\n`;
+                            transactionText += `   To: ${counterparty}\n`;
+                            transactionText += `   ${status} ${tx.status} • ${date} ${time}\n\n`;
                         });
                         
-                        transactionText += `_Showing latest ${transactions.length} transactions_\n💾 Storage: ${dbConnected ? 'MongoDB' : 'Memory'}`;
+                        transactionText += `_Showing latest ${transactions.length} transactions_`;
                         
                         await socket.sendMessage(sender, {
                             text: transactionText
@@ -1078,9 +1120,9 @@ async function setupCommandHandlers(socket, number) {
                         const profileText = `👤 *Your Profile*\n\n` +
                                           `📝 Name: ${user.name}\n` +
                                           `📱 Phone: ${user.phone}\n` +
-                                          `💰 Balance: KES ${user.balance}\n` +
+                                          `💰 Balance: ${formatCurrency(user.balance)}\n` +
                                           `📅 Registered: ${new Date(user.createdAt).toLocaleDateString()}\n` +
-                                          `💾 Storage: ${dbConnected ? 'MongoDB' : 'Memory'}`;
+                                          `🆔 User ID: ${user._id}`;
                         
                         if (user.profilePath && fs.existsSync(user.profilePath)) {
                             await socket.sendMessage(sender, {
@@ -1107,11 +1149,12 @@ async function setupCommandHandlers(socket, number) {
                                    `📝 *${prefix}register* - Create your BeraPay account\n` +
                                    `💰 *${prefix}balance* - Check your wallet balance\n` +
                                    `💸 *${prefix}send <amount> to <number>* - Send money to others\n` +
-                                   `📥 *${prefix}deposit <amount>* - Add money via M-Pesa\n` +
+                                   `📥 *${prefix}deposit <amount>* - Add money via STK Push\n` +
                                    `📜 *${prefix}transactions* - View transaction history\n` +
                                    `👤 *${prefix}profile* - View your profile\n` +
                                    `❓ *${prefix}help* - Show this help menu\n\n` +
-                                   `_Powered by BeraPay Wallet System_`;
+                                   `_💳 Real-time STK Push & Transfers_\n` +
+                                   `_🔒 Secure PIN-protected wallet_`;
                     
                     await socket.sendMessage(sender, {
                         text: helpText
@@ -1135,7 +1178,8 @@ async function setupCommandHandlers(socket, number) {
 *┃* ʏᴏᴜʀ ɴᴜᴍʙᴇʀ: ${number}
 *┃* ᴠᴇʀsɪᴏɴ: ${config.version}
 *┃* ᴍᴇᴍᴏʀʏ ᴜsᴀɢᴇ: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB
-*┃* ᴅᴀᴛᴀʙᴀsᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🟡 ᴍᴇᴍᴏʀʏ'}
+*┃* ᴅᴀᴛᴀʙᴀsᴇ: 🟢 ᴍᴏɴɢᴏᴅʙ
+*┃* ᴘᴀʏᴍᴇɴᴛs: 🟢 ʀᴇᴀʟ-ᴛɪᴍᴇ
 *┗──────────────⊷*
 
 > ʀᴇsᴘᴏɴᴅ ᴛɪᴍᴇ: ${Date.now() - msg.messageTimestamp * 1000}ms`;
@@ -1307,7 +1351,8 @@ async function EmpirePair(number, res) {
                         `✅ sᴜᴄᴄᴇssғᴜʟʟʏ ᴄᴏɴɴᴇᴄᴛᴇᴅ!\n\n` +
                         `🔢 ɴᴜᴍʙᴇʀ: ${sanitizedNumber}\n` +
                         `💳 ᴡᴀʟʟᴇᴛ sʏsᴛᴇᴍ: 🟢 ᴀᴄᴛɪᴠᴇ\n` +
-                        `📊 sᴛᴏʀᴀɢᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🟡 ᴍᴇᴍᴏʀʏ'}\n\n` +
+                        `📊 ᴅᴀᴛᴀʙᴀsᴇ: 🟢 ᴍᴏɴɢᴏᴅʙ\n` +
+                        `💰 ᴘᴀʏᴍᴇɴᴛs: 🟢 ʀᴇᴀʟ-ᴛɪᴍᴇ\n\n` +
                         `🤖 ᴛʏᴘᴇ *${userConfig.PREFIX}menu* ᴛᴏ ɢᴇᴛ sᴛᴀʀᴛᴇᴅ!`,
                         '> ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ'
                     );
@@ -1348,6 +1393,61 @@ async function EmpirePair(number, res) {
     }
 }
 
+// PayHero Callback Handler
+router.post('/api/payhero/callback', async (req, res) => {
+    try {
+        const { reference, status, amount, phone, transaction_id, error_message } = req.body;
+        
+        console.log('🔔 PayHero callback received:', { reference, status, amount, phone, transaction_id });
+
+        // Update transaction status
+        await dbOps.updateTransaction(
+            { reference: reference },
+            { 
+                $set: { 
+                    status: status,
+                    transactionId: transaction_id,
+                    error: error_message,
+                    updatedAt: new Date()
+                }
+            }
+        );
+
+        const pendingTx = pendingTransactions.get(reference);
+        
+        if (status === 'success' && pendingTx) {
+            // Update user balance
+            await dbOps.updateUserBalance(phone, amount);
+            
+            // Notify user
+            const { socket, sender } = pendingTx;
+            const user = await dbOps.findUser({ phone });
+            
+            await socket.sendMessage(sender, {
+                text: `✅ *Deposit Successful!*\n\nAmount: ${formatCurrency(amount)}\nNew Balance: ${formatCurrency(user.balance)}\nReference: ${reference}\nTransaction ID: ${transaction_id}`
+            });
+            
+            console.log(`✅ Deposit completed for ${phone}: ${formatCurrency(amount)}`);
+            pendingTransactions.delete(reference);
+            
+        } else if (status === 'failed' && pendingTx) {
+            const { socket, sender } = pendingTx;
+            
+            await socket.sendMessage(sender, {
+                text: `❌ *Deposit Failed!*\n\nAmount: ${formatCurrency(amount)}\nError: ${error_message || 'Payment failed'}\nReference: ${reference}`
+            });
+            
+            console.log(`❌ Deposit failed for ${phone}: ${error_message}`);
+            pendingTransactions.delete(reference);
+        }
+
+        res.status(200).json({ success: true });
+    } catch (error) {
+        console.error('PayHero callback error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 async function autoReconnectFromMEGA() {
     try {
         if (!fs.existsSync(NUMBER_LIST_PATH)) return;
@@ -1386,7 +1486,8 @@ router.get('/', async (req, res) => {
 router.get('/active', (req, res) => {
     res.status(200).send({
         count: activeSockets.size,
-        numbers: Array.from(activeSockets.keys())
+        numbers: Array.from(activeSockets.keys()),
+        database: dbConnected ? 'connected' : 'disconnected'
     });
 });
 
@@ -1395,7 +1496,8 @@ router.get('/ping', (req, res) => {
         status: 'active',
         message: '👻 ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ',
         activesession: activeSockets.size,
-        database: dbConnected ? 'mongodb' : 'memory'
+        database: dbConnected ? 'connected' : 'disconnected',
+        payhero: config.PAYHERO_AUTH_TOKEN ? 'configured' : 'not configured'
     });
 });
 
