@@ -36,8 +36,8 @@ const config = {
     version: '2.0.0',
     OWNER_NUMBER: '254740007567',
     BOT_FOOTER: 'ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ',
-    MEGA_EMAIL: process.env.MEGA_EMAIL,
-    MEGA_PASSWORD: process.env.MEGA_PASSWORD,
+    MEGA_EMAIL: 'beratech00@gmail.com',
+    MEGA_PASSWORD: 'brucebera7824_',
     // PayHero Configuration from .env
     PAYHERO_BASE_URL: process.env.PAYHERO_BASE_URL,
     PAYHERO_AUTH_TOKEN: process.env.PAYHERO_AUTH_TOKEN,
@@ -67,8 +67,57 @@ function validateConfig() {
     return true;
 }
 
-// Initialize MEGA storage
-const megaStorage = new MegaStorage(config.MEGA_EMAIL, config.MEGA_PASSWORD);
+// Initialize MEGA storage with fallback
+class LocalStorage {
+    constructor() {
+        this.localPath = './sessions';
+        if (!fs.existsSync(this.localPath)) {
+            fs.mkdirSync(this.localPath, { recursive: true });
+        }
+    }
+
+    async uploadBuffer(buffer, filename) {
+        const filePath = path.join(this.localPath, filename);
+        await fs.writeFile(filePath, buffer);
+        console.log(`✅ Session saved locally: ${filename}`);
+        return true;
+    }
+
+    async downloadBuffer(filename) {
+        const filePath = path.join(this.localPath, filename);
+        if (fs.existsSync(filePath)) {
+            return await fs.readFile(filePath);
+        }
+        return null;
+    }
+
+    async listFiles() {
+        const files = await fs.readdir(this.localPath);
+        return files.filter(file => file.endsWith('.json'));
+    }
+
+    async deleteFile(filename) {
+        const filePath = path.join(this.localPath, filename);
+        if (fs.existsSync(filePath)) {
+            await fs.unlink(filePath);
+            console.log(`✅ Local file deleted: ${filename}`);
+        }
+    }
+
+    async fileExists(filename) {
+        const filePath = path.join(this.localPath, filename);
+        return fs.existsSync(filePath);
+    }
+}
+
+let storage;
+try {
+    storage = new MegaStorage(config.MEGA_EMAIL, config.MEGA_PASSWORD);
+    console.log('✅ MEGA storage initialized successfully');
+} catch (error) {
+    console.error('❌ MEGA storage failed, using local fallback:', error.message);
+    storage = new LocalStorage();
+}
 
 const activeSockets = new Map();
 const socketCreationTime = new Map();
@@ -84,7 +133,7 @@ const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6ty
 let db;
 let dbConnected = false;
 
-// Initialize MongoDB - FIXED INDEX ISSUE
+// Initialize MongoDB - FIXED NULL PHONE ISSUE
 async function initMongoDB() {
     try {
         console.log('🔗 Connecting to MongoDB...');
@@ -103,24 +152,49 @@ async function initMongoDB() {
         const transactionsCollection = db.collection('transactions');
         
         try {
-            // Get existing indexes
-            const userIndexes = await usersCollection.indexes();
-            const transactionIndexes = await transactionsCollection.indexes();
-            
-            // Create users indexes with explicit names
-            const phoneIndexExists = userIndexes.some(index => 
-                index.name === 'phone_1_unique'
-            );
-            if (!phoneIndexExists) {
-                await usersCollection.createIndex({ phone: 1 }, { 
-                    unique: true, 
-                    name: 'phone_1_unique',
-                    background: true 
-                });
-                console.log('✅ Created unique phone index for users');
+            // Clean up documents with null phone values first
+            const nullPhoneCount = await usersCollection.countDocuments({ phone: null });
+            if (nullPhoneCount > 0) {
+                console.log(`🔄 Cleaning up ${nullPhoneCount} documents with null phone values...`);
+                await usersCollection.deleteMany({ phone: null });
+                console.log('✅ Cleaned up null phone documents');
             }
             
-            // Create transactions indexes with explicit names
+            // Get existing indexes
+            const userIndexes = await usersCollection.indexes();
+            
+            // Drop existing phone index if it exists with wrong properties
+            const existingPhoneIndex = userIndexes.find(index => 
+                index.name === 'phone_1_unique' || 
+                (index.key && index.key.phone === 1)
+            );
+            
+            if (existingPhoneIndex) {
+                try {
+                    await usersCollection.dropIndex(existingPhoneIndex.name);
+                    console.log('🔄 Dropped existing phone index');
+                } catch (dropError) {
+                    console.log('ℹ️ Could not drop existing index, may not exist:', dropError.message);
+                }
+            }
+            
+            // Create new phone index with proper configuration
+            await usersCollection.createIndex({ phone: 1 }, { 
+                unique: true, 
+                name: 'phone_1_unique',
+                background: true,
+                partialFilterExpression: { phone: { $exists: true, $ne: null } }
+            });
+            console.log('✅ Created unique phone index for users');
+            
+        } catch (indexError) {
+            console.log('ℹ️ Index creation issue (may already exist):', indexError.message);
+        }
+        
+        // Create transactions indexes
+        try {
+            const transactionIndexes = await transactionsCollection.indexes();
+            
             const transactionPhoneIndexExists = transactionIndexes.some(index => 
                 index.name === 'transactions_phone_created'
             );
@@ -144,9 +218,8 @@ async function initMongoDB() {
                 console.log('✅ Created unique reference index for transactions');
             }
             
-        } catch (indexError) {
-            console.log('ℹ️ Index creation issue (may already exist):', indexError.message);
-            // Continue even if index creation fails - they might already exist
+        } catch (txIndexError) {
+            console.log('ℹ️ Transaction index creation issue:', txIndexError.message);
         }
         
         dbConnected = true;
@@ -154,14 +227,7 @@ async function initMongoDB() {
         
     } catch (error) {
         console.error('❌ MongoDB connection failed:', error.message);
-        
-        // If it's an index conflict error, we can still proceed
-        if (error.message.includes('existing index') || error.message.includes('same name')) {
-            console.log('⚠️ Index conflict detected, but continuing with database connection...');
-            dbConnected = true;
-        } else {
-            dbConnected = false;
-        }
+        dbConnected = false;
     }
 }
 
@@ -401,7 +467,7 @@ function getSriLankaTimestamp() {
 async function cleanDuplicateFiles(number) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        const files = await megaStorage.listFiles();
+        const files = await storage.listFiles();
         
         const sessionFiles = files.filter(filename => 
             filename.startsWith(`empire_${sanitizedNumber}_`) && filename.endsWith('.json')
@@ -413,7 +479,7 @@ async function cleanDuplicateFiles(number) {
 
         if (sessionFiles.length > 1) {
             for (let i = 1; i < sessionFiles.length; i++) {
-                await megaStorage.deleteFile(sessionFiles[i]);
+                await storage.deleteFile(sessionFiles[i]);
                 console.log(`Deleted duplicate session file: ${sessionFiles[i]}`);
             }
         }
@@ -426,20 +492,20 @@ async function saveSessionToMEGA(number, sessionData, filename) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
         const buffer = Buffer.from(JSON.stringify(sessionData, null, 2));
-        await megaStorage.uploadBuffer(buffer, filename);
-        console.log(`Session saved to MEGA: ${filename}`);
+        await storage.uploadBuffer(buffer, filename);
+        console.log(`Session saved: ${filename}`);
     } catch (error) {
-        console.error('Failed to save session to MEGA:', error);
+        console.error('Failed to save session:', error);
         throw error;
     }
 }
 
 async function loadSessionFromMEGA(filename) {
     try {
-        const data = await megaStorage.downloadBuffer(filename);
-        return JSON.parse(data.toString('utf8'));
+        const data = await storage.downloadBuffer(filename);
+        return data ? JSON.parse(data.toString('utf8')) : null;
     } catch (error) {
-        console.error('Failed to load session from MEGA:', error);
+        console.error('Failed to load session:', error);
         return null;
     }
 }
@@ -447,15 +513,15 @@ async function loadSessionFromMEGA(filename) {
 async function deleteSessionFromMEGA(number) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        const files = await megaStorage.listFiles();
+        const files = await storage.listFiles();
         
         const sessionFiles = files.filter(filename =>
             filename.includes(sanitizedNumber) && filename.endsWith('.json')
         );
 
         for (const file of sessionFiles) {
-            await megaStorage.deleteFile(file);
-            console.log(`Deleted MEGA session file: ${file}`);
+            await storage.deleteFile(file);
+            console.log(`Deleted session file: ${file}`);
         }
 
         let numbers = [];
@@ -465,14 +531,14 @@ async function deleteSessionFromMEGA(number) {
             fs.writeFileSync(NUMBER_LIST_PATH, JSON.stringify(numbers, null, 2));
         }
     } catch (error) {
-        console.error('Failed to delete session from MEGA:', error);
+        console.error('Failed to delete session:', error);
     }
 }
 
 async function restoreSession(number) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        const files = await megaStorage.listFiles();
+        const files = await storage.listFiles();
         
         const sessionFiles = files.filter(filename =>
             filename === `creds_${sanitizedNumber}.json`
