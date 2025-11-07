@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="si">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mercedes Mini</title>
+  <link rel="icon" type="image/x-icon" href="https://i.ibb.co/hRVcfQGK/vision-v.jpg">
+  <meta property="og:image" content="https://i.ibb.co/BH4yttvK/vision-v.jpg">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: linear-gradient(135deg, #00D4FF, #0066CC);
+      --glass: rgba(255, 255, 255, 0.15);
+      --glass-border: rgba(255, 255, 255, 0.2);
+      --text: #ffffff;
+      --muted: #708090;
+      --highlight: #00D4FF;
+      --radius: 16px;
+      --blur: 16px;
+      --transition: 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+      --glow: 0 0 15px rgba(0, 212, 255, 0.3);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Poppins', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      position: relative;
+      overflow-x: hidden;
+      color: var(--text);
+      padding: 80px 20px 120px;
+      background: url('https://i.ibb.co/Z6xVjrhF/vision-v.jpg') no-repeat center center fixed;
+      background-size: cover;
+    }
+
+    /* Liquid glass morphism effect for containers */
+    .glass {
+      background: var(--glass);
+      backdrop-filter: blur(var(--blur));
+      border-radius: var(--radius);
+      border: 1px solid var(--glass-border);
+      box-shadow: 
+        0 10px 35px rgba(0, 0, 0, 0.4),
+        inset 0 1px 0 rgba(255, 255, 255, 0.2),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.1);
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Liquid glass shine effect */
+    .glass::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255, 255, 255, 0.1),
+        transparent
+      );
+      transition: left 0.7s ease;
+    }
+
+    .glass:hover::before {
+      left: 100%;
+    }
+
+    /* Loading overlay */
+    .loading-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+      backdrop-filter: blur(10px);
+      transition: opacity 0.5s ease;
+    }
+    
+    .loading-spinner {
+      width: 70px;
+      height: 70px;
+      border: 5px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: var(--highlight);
+      animation: spin 1s ease-in-out infinite;
+    }
+    
+    .loading-text {
+      margin-top: 20px;
+      font-size: 18px;
+      color: var(--text);
+      text-align: center;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* card */
+    .wrap {
+      position: relative;
+      z-index: 2;
+      width: 380px;
+      max-width: 95%;
+      margin-bottom: 80px;
+    }
+    
+    .box {
+      position: relative;
+      padding: 110px 22px 26px; /* Increased top padding for avatar spacing */
+      text-align: center;
+      transition: transform .5s ease, opacity .45s ease;
+    }
+
+    /* avatar image overlapping top with proper spacing */
+    .avatar {
+      position: absolute;
+      top: -70px; /* Increased distance from top */
+      left: 50%;
+      transform: translateX(-50%);
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      overflow: hidden;
+      border: 4px solid rgba(255, 255, 255, 0.2);
+      box-shadow: 0 8px 30px rgba(255, 40, 40, 0.22);
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      z-index: 3;
+    }
+    
+    .avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    h3 {
+      color: #fff;
+      margin-top: 6px;
+      font-weight: 700;
+      font-size: 1.8rem;
+      text-shadow: 0 0 12px rgba(0, 212, 255, 0.5);
+    }
+    
+    h6 {
+      color: #ccc;
+      font-weight: 400;
+      margin: 6px 0;
+      font-size: 1rem;
+    }
+
+    .input-container {
+      display: flex;
+      flex-direction: column;
+      margin-top: 20px;
+      gap: 15px;
+    }
+    
+    .input-container input {
+      padding: 16px;
+      border-radius: 12px;
+      border: none;
+      outline: none;
+      background: rgba(0, 0, 0, 0.3);
+      color: #fff;
+      font-size: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.3s ease;
+      text-align: center;
+    }
+    
+    .input-container input:focus {
+      box-shadow: 0 0 16px rgba(0, 212, 255, 0.3);
+      border-color: var(--highlight);
+    }
+    
+    .input-container button {
+      padding: 16px;
+      border-radius: 12px;
+      border: none;
+      background: var(--primary);
+      color: #fff;
+      font-weight: 600;
+      font-size: 16px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      box-shadow: 0 5px 20px rgba(0, 0, 0, 0.3);
+      width: 100%;
+    }
+    
+    .input-container button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4);
+    }
+    
+    .input-container button:active {
+      transform: translateY(1px);
+    }
+    
+    .info {
+      margin-top: 14px;
+      color: #ffdede;
+      font-weight: 600;
+      text-shadow: 0 0 6px rgba(255, 120, 120, 0.06);
+    }
+
+    /* Footer styling */
+    .footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 1rem 2rem;
+      background: var(--glass);
+      backdrop-filter: blur(var(--blur));
+      z-index: 100;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .social-icons {
+      display: flex;
+      gap: 1.2rem;
+    }
+    
+    .social-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text);
+      text-decoration: none;
+      font-size: 20px;
+      transition: all 0.3s ease;
+      width: 45px;
+      height: 45px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(5px);
+      -webkit-backdrop-filter: blur(5px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    
+    .social-icon:hover {
+      background: rgba(255, 255, 255, 0.1);
+      transform: translateY(-3px);
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+      color: var(--highlight);
+    }
+
+    /* small screens */
+    @media (max-width:768px){
+      .avatar {
+        width: 96px;
+        height: 96px;
+        top: -58px; /* Adjusted for smaller avatar */
+      }
+      
+      .box {
+        padding-top: 88px; /* Adjusted padding for smaller avatar */
+      }
+      
+      .social-icons {
+        gap: 0.8rem;
+      }
+      
+      .social-icon {
+        width: 40px;
+        height: 40px;
+        font-size: 18px;
+      }
+    }
+    
+    @media (max-width:480px){
+      .social-icons {
+        gap: 0.5rem;
+      }
+      
+      .social-icon {
+        width: 35px;
+        height: 35px;
+        font-size: 16px;
+      }
+      
+      .wrap {
+        margin-bottom: 120px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Updating, please wait...</div>
+  </div>
+
+  <div class="wrap">
+    <div class="box glass" id="mainBox">
+      <!-- avatar (image overlaps top of card with proper spacing) -->
+      <div class="avatar">
+        <img src="https://i.ibb.co/fY1HYkBT/vision-v.jpg" alt="Avatar">
+      </div>
+
+      <h3>Mercedes Mini</h3>
+      <h6>Made By Marisel</h6>
+      <h6>📱 Enter your number with country code</h6>
+
+      <div class="input-container" style="margin-top:20px">
+        <input id="number" type="tel" placeholder="25474xxxx" inputmode="numeric" pattern="[0-9]*" />
+        <button id="submit">Submit</button>
+      </div>
+
+      <div class="info" id="pair" style="min-height:28px"></div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div class="social-icons">
+      <a href="https://youtube.com/@wemacomic?si=VoLQFISuUFRtR75b" target="_blank" class="social-icon" title="YouTube">
+        <i class="fab fa-youtube"></i>
+      </a>
+      <a href="https://whatsapp.com/channel/0029Vajvy2kEwEjwAKP4SI0x" target="_blank" class="social-icon" title="Channel">
+        <i class="fab fa-whatsapp"></i>
+      </a>
+      <a href="https://chat.whatsapp.com/GBz10zMKECuEKUlmfNsglx?mode=ems_copy_c" target="_blank" class="social-icon" title="Group">
+        <i class="fas fa-users"></i>
+      </a>
+      <a href="https://wa.me/254790375710" target="_blank" class="social-icon" title="Contact">
+        <i class="fas fa-phone-alt"></i>
+      </a>
+      <a href="https://deploying-green.vercel.app/" target="_blank" class="social-icon" title="Support">
+        <i class="fas fa-life-ring"></i>
+      </a>
+    </div>
+  </div>
+
+  <script>
+    // Show loading overlay for 3 seconds when page loads
+    document.addEventListener('DOMContentLoaded', function() {
+      const loadingOverlay = document.getElementById('loadingOverlay');
+      
+      // Show the loading overlay
+      loadingOverlay.style.display = 'flex';
+      
+      // Hide after 3 seconds
+      setTimeout(function() {
+        loadingOverlay.style.opacity = '0';
+        setTimeout(function() {
+          loadingOverlay.style.display = 'none';
+        }, 500);
+      }, 3000);
+    });
+
+    // submit behavior
+    const pair = document.getElementById('pair');
+    const submit = document.getElementById('submit');
+    const num = document.getElementById('number');
+
+    submit.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (!num.value || num.value.replace(/[^0-9]/g,'').length < 9) {
+        pair.innerHTML = '<span style="color:#ffb3b3;font-weight:700">Invalid or missing number</span>';
+        return;
+      }
+      const number = num.value.replace(/[^0-9]/g,'');
+      num.value = '+' + number;
+      num.style.background = '#120000';
+      pair.innerHTML = '<span style="color:#ffdede;font-weight:700">Please wait...</span>';
+      try {
+        let res = await fetch(`/code?number=${number}`);
+        let data = await res.json();
+        let code = data.code || 'Service Unavailable';
+        pair.innerHTML = `<div id="copy" style="color:#ffb3b3;font-weight:700;cursor:pointer" onclick="copyCode()"><strong>CODE:</strong> <span style="color:#fff">${code}</span></div>`;
+      } catch (err) {
+        pair.innerHTML = '<span style="color:orangered;font-weight:700">Error fetching code</span>';
+      }
+    });
+
+    function copyCode(){
+      const el = document.getElementById('copy');
+      if (!el) return;
+      const txt = el.innerText.replace('CODE:','').trim();
+      navigator.clipboard?.writeText(txt).then(()=>{
+        const old = el.innerHTML;
+        el.innerHTML = '<strong style="color:lime">COPIED</strong>';
+        setTimeout(()=> el.innerHTML = old,700);
+      }).catch(()=>{});
+    }
+
+    // optional: allow pressing Enter on input to submit
+    num.addEventListener('keydown', (e)=> {
+      if (e.key === 'Enter') submit.click();
+    });
+  </script>
+</body>
+</html>
