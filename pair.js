@@ -84,7 +84,7 @@ const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6ty
 let db;
 let dbConnected = false;
 
-// Initialize MongoDB
+// Initialize MongoDB - FIXED INDEX ISSUE
 async function initMongoDB() {
     try {
         console.log('🔗 Connecting to MongoDB...');
@@ -99,17 +99,69 @@ async function initMongoDB() {
         db = client.db();
         await db.command({ ping: 1 });
         
-        // Create collections and indexes
-        await db.collection('users').createIndex({ phone: 1 }, { unique: true });
-        await db.collection('transactions').createIndex({ phone: 1, createdAt: -1 });
-        await db.collection('transactions').createIndex({ reference: 1 }, { unique: true });
+        const usersCollection = db.collection('users');
+        const transactionsCollection = db.collection('transactions');
+        
+        try {
+            // Get existing indexes
+            const userIndexes = await usersCollection.indexes();
+            const transactionIndexes = await transactionsCollection.indexes();
+            
+            // Create users indexes with explicit names
+            const phoneIndexExists = userIndexes.some(index => 
+                index.name === 'phone_1_unique'
+            );
+            if (!phoneIndexExists) {
+                await usersCollection.createIndex({ phone: 1 }, { 
+                    unique: true, 
+                    name: 'phone_1_unique',
+                    background: true 
+                });
+                console.log('✅ Created unique phone index for users');
+            }
+            
+            // Create transactions indexes with explicit names
+            const transactionPhoneIndexExists = transactionIndexes.some(index => 
+                index.name === 'transactions_phone_created'
+            );
+            if (!transactionPhoneIndexExists) {
+                await transactionsCollection.createIndex({ phone: 1, createdAt: -1 }, { 
+                    name: 'transactions_phone_created',
+                    background: true 
+                });
+                console.log('✅ Created phone-created index for transactions');
+            }
+            
+            const referenceIndexExists = transactionIndexes.some(index => 
+                index.name === 'reference_unique'
+            );
+            if (!referenceIndexExists) {
+                await transactionsCollection.createIndex({ reference: 1 }, { 
+                    unique: true, 
+                    name: 'reference_unique',
+                    background: true 
+                });
+                console.log('✅ Created unique reference index for transactions');
+            }
+            
+        } catch (indexError) {
+            console.log('ℹ️ Index creation issue (may already exist):', indexError.message);
+            // Continue even if index creation fails - they might already exist
+        }
         
         dbConnected = true;
         console.log('✅ MongoDB connected successfully');
         
     } catch (error) {
         console.error('❌ MongoDB connection failed:', error.message);
-        dbConnected = false;
+        
+        // If it's an index conflict error, we can still proceed
+        if (error.message.includes('existing index') || error.message.includes('same name')) {
+            console.log('⚠️ Index conflict detected, but continuing with database connection...');
+            dbConnected = true;
+        } else {
+            dbConnected = false;
+        }
     }
 }
 
@@ -1713,7 +1765,6 @@ router.get('/active', (req, res) => {
     });
 });
 
-// FIXED: Added missing closing parenthesis
 router.get('/ping', (req, res) => {
     res.status(200).send({
         status: 'active',
