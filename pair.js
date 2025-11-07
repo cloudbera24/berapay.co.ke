@@ -1713,7 +1713,8 @@ router.get('/active', (req, res) => {
     });
 });
 
-router.get('/ping', (req, res) {
+// FIXED: Added missing closing parenthesis
+router.get('/ping', (req, res) => {
     res.status(200).send({
         status: 'active',
         message: '👻 ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ',
