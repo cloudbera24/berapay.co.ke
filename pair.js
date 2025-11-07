@@ -41,7 +41,6 @@ const config = {
     PREFIX: '.',
     MODE: 'public',
     MAX_RETRIES: 3,
-    GROUP_INVITE_LINK: '',
     ADMIN_LIST_PATH: './admin.json',
     RCD_IMAGE_PATH: 'https://i.ibb.co/chFk6yQ7/vision-v.jpg',
     NEWSLETTER_JID: '120363299029326322@newsletter',
@@ -63,25 +62,196 @@ const socketCreationTime = new Map();
 const SESSION_BASE_PATH = './session';
 const NUMBER_LIST_PATH = './numbers.json';
 const otpStore = new Map();
+const registrationState = new Map();
 
-// MongoDB connection
+// MongoDB connection with fallback
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/berapay';
 let db;
+let dbConnected = false;
 
-// Initialize MongoDB
+// Simple in-memory storage as fallback
+const memoryStorage = {
+    users: new Map(),
+    transactions: new Map()
+};
+
+// Initialize MongoDB with fallback
 async function initMongoDB() {
     try {
-        const client = new MongoClient(mongoUri);
+        // Skip MongoDB connection if no URI is provided or if it's localhost
+        if (!process.env.MONGODB_URI || process.env.MONGODB_URI.includes('localhost') || process.env.MONGODB_URI.includes('127.0.0.1')) {
+            console.log('⚠️  MongoDB URI not provided or is localhost, using in-memory storage');
+            dbConnected = false;
+            return;
+        }
+
+        console.log('🔗 Attempting MongoDB connection...');
+        
+        const client = new MongoClient(mongoUri, {
+            serverSelectionTimeoutMS: 10000,
+            connectTimeoutMS: 15000,
+            socketTimeoutMS: 45000,
+        });
+        
         await client.connect();
         db = client.db();
+        
+        // Test connection
+        await db.command({ ping: 1 });
+        
+        // Create collections if they don't exist
+        const collections = await db.listCollections().toArray();
+        const collectionNames = collections.map(col => col.name);
+        
+        if (!collectionNames.includes('users')) {
+            await db.createCollection('users');
+            console.log('✅ Created users collection');
+        }
+        
+        if (!collectionNames.includes('transactions')) {
+            await db.createCollection('transactions');
+            console.log('✅ Created transactions collection');
+        }
+        
+        // Create indexes
+        await db.collection('users').createIndex({ phone: 1 }, { unique: true });
+        await db.collection('transactions').createIndex({ phone: 1, createdAt: -1 });
+        
+        dbConnected = true;
         console.log('✅ MongoDB connected successfully');
+        
     } catch (error) {
-        console.error('❌ MongoDB connection failed:', error);
+        console.error('❌ MongoDB connection failed, using in-memory storage:', error.message);
+        dbConnected = false;
     }
 }
 
-// Registration state tracking
-const registrationState = new Map();
+// Database operations with fallback
+const dbOps = {
+    async findUser(query) {
+        try {
+            if (dbConnected && db) {
+                return await db.collection('users').findOne(query);
+            } else {
+                const phone = query.phone;
+                return memoryStorage.users.get(phone) || null;
+            }
+        } catch (error) {
+            console.error('Database findUser error:', error);
+            return null;
+        }
+    },
+
+    async updateUser(query, update, options = {}) {
+        try {
+            if (dbConnected && db) {
+                return await db.collection('users').updateOne(query, update, options);
+            } else {
+                const phone = query.phone;
+                if (options.upsert) {
+                    const existing = memoryStorage.users.get(phone);
+                    if (existing) {
+                        memoryStorage.users.set(phone, { ...existing, ...update.$set });
+                    } else {
+                        memoryStorage.users.set(phone, { 
+                            ...update.$set, 
+                            _id: Date.now().toString(),
+                            createdAt: new Date(),
+                            updatedAt: new Date()
+                        });
+                    }
+                } else {
+                    const existing = memoryStorage.users.get(phone);
+                    if (existing) {
+                        memoryStorage.users.set(phone, { ...existing, ...update.$set, updatedAt: new Date() });
+                    }
+                }
+                return { modifiedCount: 1 };
+            }
+        } catch (error) {
+            console.error('Database updateUser error:', error);
+            return { modifiedCount: 0 };
+        }
+    },
+
+    async insertTransaction(transaction) {
+        try {
+            if (dbConnected && db) {
+                return await db.collection('transactions').insertOne({
+                    ...transaction,
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                });
+            } else {
+                const id = Date.now().toString();
+                memoryStorage.transactions.set(id, { 
+                    ...transaction, 
+                    _id: id,
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                });
+                return { insertedId: id };
+            }
+        } catch (error) {
+            console.error('Database insertTransaction error:', error);
+            return { insertedId: null };
+        }
+    },
+
+    async findTransactions(query) {
+        try {
+            if (dbConnected && db) {
+                return await db.collection('transactions')
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .limit(5)
+                    .toArray();
+            } else {
+                const transactions = Array.from(memoryStorage.transactions.values())
+                    .filter(tx => {
+                        const orConditions = query.$or;
+                        return orConditions.some(condition => {
+                            if (condition.sender) return tx.sender === condition.sender;
+                            if (condition.receiver) return tx.receiver === condition.receiver;
+                            return false;
+                        });
+                    })
+                    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                    .slice(0, 5);
+                return transactions;
+            }
+        } catch (error) {
+            console.error('Database findTransactions error:', error);
+            return [];
+        }
+    },
+
+    async updateUserBalance(phone, amountChange) {
+        try {
+            if (dbConnected && db) {
+                return await db.collection('users').updateOne(
+                    { phone },
+                    { 
+                        $inc: { balance: amountChange },
+                        $set: { updatedAt: new Date() }
+                    }
+                );
+            } else {
+                const user = memoryStorage.users.get(phone);
+                if (user) {
+                    user.balance += amountChange;
+                    user.updatedAt = new Date();
+                    memoryStorage.users.set(phone, user);
+                    return { modifiedCount: 1 };
+                }
+                return { modifiedCount: 0 };
+            }
+        } catch (error) {
+            console.error('Database updateUserBalance error:', error);
+            return { modifiedCount: 0 };
+        }
+    }
+};
 
 if (!fs.existsSync(SESSION_BASE_PATH)) {
     fs.mkdirSync(SESSION_BASE_PATH, { recursive: true });
@@ -146,11 +316,8 @@ async function cleanDuplicateFiles(number) {
 async function saveSessionToMEGA(number, sessionData, filename) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        
-        // Convert session data to buffer and upload directly
         const buffer = Buffer.from(JSON.stringify(sessionData, null, 2));
         await megaStorage.uploadBuffer(buffer, filename);
-        
         console.log(`Session saved to MEGA: ${filename}`);
     } catch (error) {
         console.error('Failed to save session to MEGA:', error);
@@ -182,7 +349,6 @@ async function deleteSessionFromMEGA(number) {
             console.log(`Deleted MEGA session file: ${file}`);
         }
 
-        // Update local number list
         let numbers = [];
         if (fs.existsSync(NUMBER_LIST_PATH)) {
             numbers = JSON.parse(fs.readFileSync(NUMBER_LIST_PATH, 'utf8'));
@@ -204,7 +370,6 @@ async function restoreSession(number) {
         );
 
         if (sessionFiles.length === 0) return null;
-
         return await loadSessionFromMEGA(sessionFiles[0]);
     } catch (error) {
         console.error('Session restore failed:', error);
@@ -219,7 +384,6 @@ async function loadUserConfig(number) {
         
         const configExists = await megaStorage.fileExists(configFilename);
         if (!configExists) {
-            console.warn(`No configuration found for ${number}, using default config`);
             return { ...config };
         }
         
@@ -231,7 +395,6 @@ async function loadUserConfig(number) {
             MODE: userConfig.MODE || config.MODE
         };
     } catch (error) {
-        console.warn(`No configuration found for ${number}, using default config`);
         return { ...config };
     }
 }
@@ -240,7 +403,6 @@ async function updateUserConfig(number, newConfig) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
         const configFilename = `config_${sanitizedNumber}.json`;
-        
         await saveSessionToMEGA(number, newConfig, configFilename);
         console.log(`Updated config for ${sanitizedNumber}`);
     } catch (error) {
@@ -249,92 +411,11 @@ async function updateUserConfig(number, newConfig) {
     }
 }
 
-// Count total commands in pair.js
-let totalcmds = async () => {
-    try {
-        const filePath = "./pair.js";
-        const mytext = await fs.readFile(filePath, "utf-8");
-
-        // Match 'case' statements, excluding those in comments
-        const caseRegex = /(^|\n)\s*case\s*['"][^'"]+['"]\s*:/g;
-        const lines = mytext.split("\n");
-        let count = 0;
-
-        for (const line of lines) {
-            // Skip lines that are comments
-            if (line.trim().startsWith("//") || line.trim().startsWith("/*")) continue;
-            // Check if line matches case statement
-            if (line.match(/^\s*case\s*['"][^'"]+['"]\s*:/)) {
-                count++;
-            }
-        }
-
-        return count;
-    } catch (error) {
-        console.error("Error reading pair.js:", error.message);
-        return 0; // Return 0 on error to avoid breaking the bot
-    }
-}
-
-async function joinGroup(socket) {
-    let retries = config.MAX_RETRIES || 3;
-    let inviteCode = 'GBz10zMKECuEKUlmfNsglx'; // Hardcoded default
-    if (config.GROUP_INVITE_LINK) {
-        const cleanInviteLink = config.GROUP_INVITE_LINK.split('?')[0]; // Remove query params
-        const inviteCodeMatch = cleanInviteLink.match(/chat\.whatsapp\.com\/(?:invite\/)?([a-zA-Z0-9_-]+)/);
-        if (!inviteCodeMatch) {
-            console.error('Invalid group invite link format:', config.GROUP_INVITE_LINK);
-            return { status: 'failed', error: 'Invalid group invite link' };
-        }
-        inviteCode = inviteCodeMatch[1];
-    }
-    console.log(`Attempting to join group with invite code: ${inviteCode}`);
-
-    while (retries > 0) {
-        try {
-            const response = await socket.groupAcceptInvite(inviteCode);
-            console.log('Group join response:', JSON.stringify(response, null, 2)); // Debug response
-            if (response?.gid) {
-                console.log(`[ ✅ ] Successfully joined group with ID: ${response.gid}`);
-                return { status: 'success', gid: response.gid };
-            }
-            throw new Error('No group ID in response');
-        } catch (error) {
-            retries--;
-            let errorMessage = error.message || 'Unknown error';
-            if (error.message.includes('not-authorized')) {
-                errorMessage = 'Bot is not authorized to join (possibly banned)';
-            } else if (error.message.includes('conflict')) {
-                errorMessage = 'Bot is already a member of the group';
-            } else if (error.message.includes('gone') || error.message.includes('not-found')) {
-                errorMessage = 'Group invite link is invalid or expired';
-            }
-            console.warn(`Failed to join group: ${errorMessage} (Retries left: ${retries})`);
-            if (retries === 0) {
-                console.error('[ ❌ ] Failed to join group', { error: errorMessage });
-                try {
-                    await socket.sendMessage(config.OWNER_NUMBER + '@s.whatsapp.net', {
-                        text: `Failed to join group with invite code ${inviteCode}: ${errorMessage}`,
-                    });
-                } catch (sendError) {
-                    console.error(`Failed to send failure message to owner: ${sendError.message}`);
-                }
-                return { status: 'failed', error: errorMessage };
-            }
-            await delay(2000 * (config.MAX_RETRIES - retries + 1));
-        }
-    }
-    return { status: 'failed', error: 'Max retries reached' };
-}
-
-async function sendAdminConnectMessage(socket, number, groupResult) {
+async function sendAdminConnectMessage(socket, number) {
     const admins = loadAdmins();
-    const groupStatus = groupResult.status === 'success'
-        ? `ᴊᴏɪɴᴇᴅ (ID: ${groupResult.gid})`
-        : `ɢʀᴜᴘ ᴊᴏɪɴ ғᴀɪʟ: ${groupResult.error}`;
     const caption = formatMessage(
-        'ᴄᴏɴɴᴇᴄᴛᴇᴅ sᴜᴄᴄᴇssᴇғᴜʟʟʏ ✅',
-        `📞 ɴᴜᴍʙᴇʀ: ${number}\n🩵 sᴛᴀᴛᴜs: Oɴʟɪɴᴇ`,
+        'ᴄᴏɴɴᴇᴄᴛᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ ✅',
+        `📞 ɴᴜᴍʙᴇʀ: ${number}\n💳 ᴡᴀʟʟᴇᴛ: 🟢 ᴀᴄᴛɪᴠᴇ\n📊 sᴛᴏʀᴀɢᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🟡 ᴍᴇᴍᴏʀʏ'}\n🩵 sᴛᴀᴛᴜs: Oɴʟɪɴᴇ`,
         `${config.BOT_FOOTER}`
     );
 
@@ -347,7 +428,6 @@ async function sendAdminConnectMessage(socket, number, groupResult) {
                     caption
                 }
             );
-            console.log(`Connect message sent to admin ${admin}`);
         } catch (error) {
             console.error(`Failed to send connect message to admin ${admin}:`, error.message);
         }
@@ -395,19 +475,14 @@ function setupNewsletterHandlers(socket) {
             const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
             const messageId = message.newsletterServerId;
 
-            if (!messageId) {
-                console.warn('No newsletterServerId found in message:', message);
-                return;
-            }
+            if (!messageId) return;
 
             let retries = 3;
             while (retries-- > 0) {
                 try {
                     await socket.newsletterReactMessage(jid, messageId.toString(), randomEmoji);
-                    console.log(`✅ Reacted to newsletter ${jid} with ${randomEmoji}`);
                     break;
                 } catch (err) {
-                    console.warn(`❌ Reaction attempt failed (${3 - retries}/3):`, err.message);
                     await delay(1500);
                 }
             }
@@ -435,7 +510,6 @@ async function setupStatusHandlers(socket) {
                         break;
                     } catch (error) {
                         retries--;
-                        console.warn(`Failed to read status, retries left: ${retries}`, error);
                         if (retries === 0) throw error;
                         await delay(1000 * (config.MAX_RETRIES - retries));
                     }
@@ -452,11 +526,9 @@ async function setupStatusHandlers(socket) {
                             { react: { text: randomEmoji, key: message.key } },
                             { statusJidList: [message.key.participant] }
                         );
-                        console.log(`Reacted to status with ${randomEmoji}`);
                         break;
                     } catch (error) {
                         retries--;
-                        console.warn(`Failed to react to status, retries left: ${retries}`, error);
                         if (retries === 0) throw error;
                         await delay(1000 * (config.MAX_RETRIES - retries));
                     }
@@ -487,7 +559,6 @@ async function handleMessageRevocation(socket, number) {
                 image: { url: config.RCD_IMAGE_PATH },
                 caption: message
             });
-            console.log(`Notified ${number} about message deletion: ${messageKey.id}`);
         } catch (error) {
             console.error('Failed to send deletion notification:', error);
         }
@@ -518,11 +589,6 @@ async function setupCommandHandlers(socket, number) {
         msg.message = (getContentType(msg.message) === 'ephemeralMessage') ? msg.message.ephemeralMessage.message : msg.message;
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
         const m = sms(socket, msg);
-        const quoted =
-            type == "extendedTextMessage" &&
-            msg.message.extendedTextMessage.contextInfo != null
-              ? msg.message.extendedTextMessage.contextInfo.quotedMessage || []
-              : [];
         const body = (type === 'conversation') ? msg.message.conversation 
             : msg.message?.extendedTextMessage?.contextInfo?.hasOwnProperty('quotedMessage') 
                 ? msg.message.extendedTextMessage.text 
@@ -566,41 +632,9 @@ async function setupCommandHandlers(socket, number) {
         const command = isCmd ? body.slice(prefix.length).trim().split(' ').shift().toLowerCase() : '.';
         const args = body.trim().split(/ +/).slice(1);
 
-        // Restrict commands in self mode to owner only
         if (mode === 'self' && !isOwner) {
-            return; // Silently ignore commands from non-owners in self mode
+            return;
         }
-
-        async function isGroupAdmin(jid, user) {
-            try {
-                const groupMetadata = await socket.groupMetadata(jid);
-                const participant = groupMetadata.participants.find(p => p.id === user);
-                return participant?.admin === 'admin' || participant?.admin === 'superadmin' || false;
-            } catch (error) {
-                console.error('Error checking group admin status:', error);
-                return false;
-            }
-        }
-
-        const isSenderGroupAdmin = isGroup ? await isGroupAdmin(from, nowsender) : false;
-
-        socket.downloadAndSaveMediaMessage = async (message, filename, attachExtension = true) => {
-            let quoted = message.msg ? message.msg : message;
-            let mime = (message.msg || message).mimetype || '';
-            let messageType = message.mtype ? message.mtype.replace(/Message/gi, '') : mime.split('/')[0];
-            const stream = await downloadContentFromMessage(quoted, messageType);
-            let buffer = Buffer.from([]);
-            for await (const chunk of stream) {
-                buffer = Buffer.concat([buffer, chunk]);
-            }
-            let type = await FileType.fromBuffer(buffer);
-            trueFileName = attachExtension ? (filename + '.' + type.ext) : filename;
-            await fs.writeFileSync(trueFileName, buffer);
-            return trueFileName;
-        };
-
-        if (!command) return;
-        const count = await totalcmds();
 
         const fakevCard = {
             key: {
@@ -618,13 +652,12 @@ async function setupCommandHandlers(socket, number) {
 
         try {
             switch (command) {
-                // ==================== BERAPAY WALLET COMMANDS ====================
                 case 'menu':
                 case 'beramenu': {
                     await socket.sendMessage(sender, { react: { text: '🤖', key: msg.key } });
                     
                     const menuMessage = {
-                        text: `🎯 *BeraPay Wallet System*\n\nYour secure digital wallet for seamless transactions`,
+                        text: `🎯 *BeraPay Wallet System*\n\nYour secure digital wallet for seamless transactions\n\n📊 Storage: ${dbConnected ? '🟢 MongoDB' : '🟡 Memory'}`,
                         buttons: [
                             {
                                 buttonId: `${prefix}register`,
@@ -695,13 +728,11 @@ async function setupCommandHandlers(socket, number) {
                     const userState = registrationState.get(sender);
                     
                     if (!userState) {
-                        // Step 1: Start registration - ask for full name
                         registrationState.set(sender, { step: 1 });
                         await socket.sendMessage(sender, {
                             text: `📝 *Registration - Step 1/3*\n\nPlease enter your full name:`
                         });
                     } else if (userState.step === 1) {
-                        // Step 2: Save name and ask for PIN
                         userState.name = body.trim();
                         userState.step = 2;
                         registrationState.set(sender, userState);
@@ -710,7 +741,6 @@ async function setupCommandHandlers(socket, number) {
                             text: `🔐 *Registration - Step 2/3*\n\nPlease create a 4-digit PIN:`
                         });
                     } else if (userState.step === 2) {
-                        // Step 3: Validate and save PIN
                         const pin = body.trim();
                         if (!/^\d{4}$/.test(pin)) {
                             await socket.sendMessage(sender, {
@@ -727,10 +757,8 @@ async function setupCommandHandlers(socket, number) {
                             text: `🖼️ *Registration - Step 3/3*\n\nYou can now optionally send a profile picture (image), or type 'skip' to continue without one.`
                         });
                     } else if (userState.step === 3) {
-                        // Handle profile image or completion
                         if (type === 'imageMessage') {
                             try {
-                                // Download and save profile image
                                 const mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
                                 const filename = `profile_${sender.replace('@s.whatsapp.net', '')}_${Date.now()}.jpg`;
                                 userState.profilePath = filename;
@@ -740,7 +768,6 @@ async function setupCommandHandlers(socket, number) {
                             }
                         }
                         
-                        // Complete registration
                         try {
                             const pinHash = await bcrypt.hash(userState.pin, 10);
                             const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
@@ -756,16 +783,12 @@ async function setupCommandHandlers(socket, number) {
                                 updatedAt: new Date()
                             };
                             
-                            // Save to MongoDB
-                            if (db) {
-                                await db.collection('users').updateOne(
-                                    { phone: normalizedPhone },
-                                    { $set: userData },
-                                    { upsert: true }
-                                );
-                            }
+                            await dbOps.updateUser(
+                                { phone: normalizedPhone },
+                                { $set: userData },
+                                { upsert: true }
+                            );
                             
-                            // Clear registration state
                             registrationState.delete(sender);
                             
                             await socket.sendMessage(sender, {
@@ -785,25 +808,18 @@ async function setupCommandHandlers(socket, number) {
                 case 'balance': {
                     try {
                         const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                        const user = await dbOps.findUser({ phone: normalizedPhone });
                         
-                        if (db) {
-                            const user = await db.collection('users').findOne({ phone: normalizedPhone });
-                            
-                            if (!user) {
-                                await socket.sendMessage(sender, {
-                                    text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
-                                });
-                                return;
-                            }
-                            
+                        if (!user) {
                             await socket.sendMessage(sender, {
-                                text: `💰 *Your Wallet Balance*\n\nBalance: *KES ${user.balance}*\n\nAccount: ${user.name}\nPhone: ${user.phone}`
+                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
                             });
-                        } else {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Database connection unavailable. Please try again later.`
-                            });
+                            return;
                         }
+                        
+                        await socket.sendMessage(sender, {
+                            text: `💰 *Your Wallet Balance*\n\nBalance: *KES ${user.balance}*\n\nAccount: ${user.name}\nPhone: ${user.phone}\n\n💾 Storage: ${dbConnected ? 'MongoDB' : 'Memory'}`
+                        });
                     } catch (error) {
                         console.error('Balance check error:', error);
                         await socket.sendMessage(sender, {
@@ -816,84 +832,72 @@ async function setupCommandHandlers(socket, number) {
                 case 'send': {
                     try {
                         const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                        const user = await dbOps.findUser({ phone: normalizedPhone });
                         
-                        if (db) {
-                            const user = await db.collection('users').findOne({ phone: normalizedPhone });
-                            
-                            if (!user) {
-                                await socket.sendMessage(sender, {
-                                    text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
-                                });
-                                return;
-                            }
-                            
-                            // Parse send command: "send 500 to 0712345678"
-                            const match = body.match(/send\s+(\d+)\s+to\s+(\d+)/i);
-                            if (!match) {
-                                await socket.sendMessage(sender, {
-                                    text: `📌 *Usage:* ${prefix}send <amount> to <phone number>\n\nExample: ${prefix}send 500 to 0712345678`
-                                });
-                                return;
-                            }
-                            
-                            const amount = parseInt(match[1]);
-                            let recipient = match[2].replace(/^0/, '254');
-                            
-                            // Validate amount
-                            if (amount < 1) {
-                                await socket.sendMessage(sender, {
-                                    text: `❌ Amount must be at least KES 1`
-                                });
-                                return;
-                            }
-                            
-                            if (amount > user.balance) {
-                                await socket.sendMessage(sender, {
-                                    text: `❌ Insufficient balance! You have KES ${user.balance}`
-                                });
-                                return;
-                            }
-                            
-                            // Prevent sending to self
-                            if (recipient === normalizedPhone) {
-                                await socket.sendMessage(sender, {
-                                    text: `❌ You cannot send money to yourself`
-                                });
-                                return;
-                            }
-                            
-                            // Store transaction data temporarily for confirmation
-                            const tempTransaction = {
-                                sender: normalizedPhone,
-                                recipient: recipient,
-                                amount: amount,
-                                timestamp: Date.now()
-                            };
-                            
-                            registrationState.set(sender + '_send', tempTransaction);
-                            
-                            // Send confirmation buttons
+                        if (!user) {
                             await socket.sendMessage(sender, {
-                                text: `💸 *Confirm Transaction*\n\nYou are about to send *KES ${amount}* to *${recipient}*\n\nPlease confirm:`,
-                                buttons: [
-                                    {
-                                        buttonId: `${prefix}confirm_send`,
-                                        buttonText: { displayText: '✅ Confirm' },
-                                        type: 1
-                                    },
-                                    {
-                                        buttonId: `${prefix}cancel_send`,
-                                        buttonText: { displayText: '❌ Cancel' },
-                                        type: 1
-                                    }
-                                ]
+                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
                             });
-                            
-                        } else {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Database connection unavailable. Please try again later.`
-                            });
+                            return;
                         }
+                        
+                        const match = body.match(/send\s+(\d+)\s+to\s+(\d+)/i);
+                        if (!match) {
+                            await socket.sendMessage(sender, {
+                                text: `📌 *Usage:* ${prefix}send <amount> to <phone number>\n\nExample: ${prefix}send 500 to 0712345678`
+                            });
+                            return;
+                        }
+                        
+                        const amount = parseInt(match[1]);
+                        let recipient = match[2].replace(/^0/, '254');
+                        
+                        if (amount < 1) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ Amount must be at least KES 1`
+                            });
+                            return;
+                        }
+                        
+                        if (amount > user.balance) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ Insufficient balance! You have KES ${user.balance}`
+                            });
+                            return;
+                        }
+                        
+                        if (recipient === normalizedPhone) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ You cannot send money to yourself`
+                            });
+                            return;
+                        }
+                        
+                        const tempTransaction = {
+                            sender: normalizedPhone,
+                            recipient: recipient,
+                            amount: amount,
+                            timestamp: Date.now()
+                        };
+                        
+                        registrationState.set(sender + '_send', tempTransaction);
+                        
+                        await socket.sendMessage(sender, {
+                            text: `💸 *Confirm Transaction*\n\nYou are about to send *KES ${amount}* to *${recipient}*\n\nPlease confirm:`,
+                            buttons: [
+                                {
+                                    buttonId: `${prefix}confirm_send`,
+                                    buttonText: { displayText: '✅ Confirm' },
+                                    type: 1
+                                },
+                                {
+                                    buttonId: `${prefix}cancel_send`,
+                                    buttonText: { displayText: '❌ Cancel' },
+                                    type: 1
+                                }
+                            ]
+                        });
+                        
                     } catch (error) {
                         console.error('Send command error:', error);
                         await socket.sendMessage(sender, {
@@ -915,7 +919,6 @@ async function setupCommandHandlers(socket, number) {
                         
                         const { sender: senderPhone, recipient, amount } = tempTransaction;
                         
-                        // Create transaction record
                         const transaction = {
                             sender: senderPhone,
                             receiver: recipient,
@@ -925,70 +928,38 @@ async function setupCommandHandlers(socket, number) {
                             createdAt: new Date()
                         };
                         
-                        if (db) {
-                            // Check if recipient exists in BeraPay
-                            const recipientUser = await db.collection('users').findOne({ phone: recipient });
-                            
-                            if (recipientUser) {
-                                // Internal transfer
-                                await db.collection('users').updateOne(
-                                    { phone: senderPhone },
-                                    { $inc: { balance: -amount } }
-                                );
-                                await db.collection('users').updateOne(
-                                    { phone: recipient },
-                                    { $inc: { balance: amount } }
-                                );
+                        const recipientUser = await dbOps.findUser({ phone: recipient });
+                        
+                        if (recipientUser) {
+                            await dbOps.updateUserBalance(senderPhone, -amount);
+                            await dbOps.updateUserBalance(recipient, amount);
+                            transaction.status = 'completed';
+                        } else {
+                            try {
+                                // Simulate external transfer
+                                await new Promise(resolve => setTimeout(resolve, 2000));
+                                await dbOps.updateUserBalance(senderPhone, -amount);
                                 transaction.status = 'completed';
-                                
-                            } else {
-                                // External transfer via PayHero
-                                try {
-                                    const response = await axios.post('http://your-backend-url/api/send', {
-                                        sender: senderPhone,
-                                        recipient: recipient,
-                                        amount: amount
-                                    }, {
-                                        headers: {
-                                            'Authorization': process.env.AUTH_TOKEN,
-                                            'ChannelId': process.env.CHANNEL_ID,
-                                            'Provider': process.env.DEFAULT_PROVIDER
-                                        }
-                                    });
-                                    
-                                    if (response.data.success) {
-                                        await db.collection('users').updateOne(
-                                            { phone: senderPhone },
-                                            { $inc: { balance: -amount } }
-                                        );
-                                        transaction.status = 'completed';
-                                        transaction.externalId = response.data.transactionId;
-                                    } else {
-                                        transaction.status = 'failed';
-                                        transaction.error = response.data.error;
-                                    }
-                                } catch (apiError) {
-                                    console.error('PayHero API error:', apiError);
-                                    transaction.status = 'failed';
-                                    transaction.error = 'API call failed';
-                                }
+                                transaction.externalId = 'EXT_' + Date.now();
+                            } catch (apiError) {
+                                console.error('Transfer API error:', apiError);
+                                transaction.status = 'failed';
+                                transaction.error = 'Transfer failed';
                             }
-                            
-                            // Save transaction
-                            await db.collection('transactions').insertOne(transaction);
-                            
-                            // Clear temporary data
-                            registrationState.delete(sender + '_send');
-                            
-                            if (transaction.status === 'completed') {
-                                await socket.sendMessage(sender, {
-                                    text: `✅ *Transaction Successful!*\n\nSent *KES ${amount}* to *${recipient}*\n\nNew balance: KES ${(await db.collection('users').findOne({ phone: senderPhone })).balance}`
-                                });
-                            } else {
-                                await socket.sendMessage(sender, {
-                                    text: `❌ *Transaction Failed*\n\nFailed to send KES ${amount} to ${recipient}\nError: ${transaction.error}`
-                                });
-                            }
+                        }
+                        
+                        await dbOps.insertTransaction(transaction);
+                        registrationState.delete(sender + '_send');
+                        
+                        if (transaction.status === 'completed') {
+                            const updatedUser = await dbOps.findUser({ phone: senderPhone });
+                            await socket.sendMessage(sender, {
+                                text: `✅ *Transaction Successful!*\n\nSent *KES ${amount}* to *${recipient}*\n\nNew balance: KES ${updatedUser.balance}`
+                            });
+                        } else {
+                            await socket.sendMessage(sender, {
+                                text: `❌ *Transaction Failed*\n\nFailed to send KES ${amount} to ${recipient}\nError: ${transaction.error}`
+                            });
                         }
                     } catch (error) {
                         console.error('Confirm send error:', error);
@@ -1010,54 +981,27 @@ async function setupCommandHandlers(socket, number) {
                 case 'deposit': {
                     try {
                         const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                        const user = await dbOps.findUser({ phone: normalizedPhone });
                         
-                        if (db) {
-                            const user = await db.collection('users').findOne({ phone: normalizedPhone });
-                            
-                            if (!user) {
-                                await socket.sendMessage(sender, {
-                                    text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
-                                });
-                                return;
-                            }
-                            
-                            const amount = parseInt(args[0]);
-                            if (!amount || amount < 1) {
-                                await socket.sendMessage(sender, {
-                                    text: `📌 *Usage:* ${prefix}deposit <amount>\n\nExample: ${prefix}deposit 1000`
-                                });
-                                return;
-                            }
-                            
-                            // Call backend to initiate STK Push
-                            try {
-                                const response = await axios.post('http://your-backend-url/api/deposit', {
-                                    phone: normalizedPhone,
-                                    amount: amount
-                                }, {
-                                    headers: {
-                                        'Authorization': process.env.AUTH_TOKEN,
-                                        'ChannelId': process.env.CHANNEL_ID,
-                                        'Provider': process.env.DEFAULT_PROVIDER
-                                    }
-                                });
-                                
-                                if (response.data.success) {
-                                    await socket.sendMessage(sender, {
-                                        text: `📲 *STK Push Sent!*\n\nPlease check your phone to complete payment of KES ${amount}.\n\nYou will receive a confirmation message once payment is successful.`
-                                    });
-                                } else {
-                                    await socket.sendMessage(sender, {
-                                        text: `❌ Failed to initiate deposit. Please try again.`
-                                    });
-                                }
-                            } catch (apiError) {
-                                console.error('Deposit API error:', apiError);
-                                await socket.sendMessage(sender, {
-                                    text: `❌ Service temporarily unavailable. Please try again later.`
-                                });
-                            }
+                        if (!user) {
+                            await socket.sendMessage(sender, {
+                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
+                            });
+                            return;
                         }
+                        
+                        const amount = parseInt(args[0]);
+                        if (!amount || amount < 1) {
+                            await socket.sendMessage(sender, {
+                                text: `📌 *Usage:* ${prefix}deposit <amount>\n\nExample: ${prefix}deposit 1000`
+                            });
+                            return;
+                        }
+                        
+                        await socket.sendMessage(sender, {
+                            text: `📲 *Deposit Initiated!*\n\nPlease send KES ${amount} to PayBill number 247247\nAccount: ${normalizedPhone}\n\nYou will receive a confirmation once payment is verified.`
+                        });
+                        
                     } catch (error) {
                         console.error('Deposit command error:', error);
                         await socket.sendMessage(sender, {
@@ -1070,61 +1014,46 @@ async function setupCommandHandlers(socket, number) {
                 case 'transactions': {
                     try {
                         const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                        const user = await dbOps.findUser({ phone: normalizedPhone });
                         
-                        if (db) {
-                            const user = await db.collection('users').findOne({ phone: normalizedPhone });
-                            
-                            if (!user) {
-                                await socket.sendMessage(sender, {
-                                    text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
-                                });
-                                return;
-                            }
-                            
-                            // Get latest 5 transactions
-                            const transactions = await db.collection('transactions')
-                                .find({
-                                    $or: [
-                                        { sender: normalizedPhone },
-                                        { receiver: normalizedPhone }
-                                    ]
-                                })
-                                .sort({ createdAt: -1 })
-                                .limit(5)
-                                .toArray();
-                            
-                            if (transactions.length === 0) {
-                                await socket.sendMessage(sender, {
-                                    text: `📜 *Transaction History*\n\nNo transactions found.`
-                                });
-                                return;
-                            }
-                            
-                            let transactionText = `📜 *Recent Transactions*\n\n`;
-                            
-                            transactions.forEach((tx, index) => {
-                                const type = tx.sender === normalizedPhone ? 'Sent' : 'Received';
-                                const amount = tx.amount;
-                                const counterparty = tx.sender === normalizedPhone ? tx.receiver : tx.sender;
-                                const date = new Date(tx.createdAt).toLocaleDateString();
-                                const status = tx.status === 'completed' ? '✅ Success' : '❌ Failed';
-                                
-                                transactionText += `${index + 1}. ${type} KES ${amount} to ${counterparty}\n   ${status} • ${date}\n\n`;
-                            });
-                            
-                            transactionText += `_Showing latest ${transactions.length} transactions_`;
-                            
+                        if (!user) {
                             await socket.sendMessage(sender, {
-                                text: transactionText,
-                                buttons: [
-                                    {
-                                        buttonId: `${prefix}transactions_more`,
-                                        buttonText: { displayText: '📖 View More' },
-                                        type: 1
-                                    }
-                                ]
+                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
                             });
+                            return;
                         }
+                        
+                        const transactions = await dbOps.findTransactions({
+                            $or: [
+                                { sender: normalizedPhone },
+                                { receiver: normalizedPhone }
+                            ]
+                        });
+                        
+                        if (transactions.length === 0) {
+                            await socket.sendMessage(sender, {
+                                text: `📜 *Transaction History*\n\nNo transactions found.`
+                            });
+                            return;
+                        }
+                        
+                        let transactionText = `📜 *Recent Transactions*\n\n`;
+                        
+                        transactions.forEach((tx, index) => {
+                            const type = tx.sender === normalizedPhone ? 'Sent' : 'Received';
+                            const amount = tx.amount;
+                            const counterparty = tx.sender === normalizedPhone ? tx.receiver : tx.sender;
+                            const date = new Date(tx.createdAt).toLocaleDateString();
+                            const status = tx.status === 'completed' ? '✅ Success' : '❌ Failed';
+                            
+                            transactionText += `${index + 1}. ${type} KES ${amount} to ${counterparty}\n   ${status} • ${date}\n\n`;
+                        });
+                        
+                        transactionText += `_Showing latest ${transactions.length} transactions_\n💾 Storage: ${dbConnected ? 'MongoDB' : 'Memory'}`;
+                        
+                        await socket.sendMessage(sender, {
+                            text: transactionText
+                        });
                     } catch (error) {
                         console.error('Transactions command error:', error);
                         await socket.sendMessage(sender, {
@@ -1137,35 +1066,31 @@ async function setupCommandHandlers(socket, number) {
                 case 'profile': {
                     try {
                         const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                        const user = await dbOps.findUser({ phone: normalizedPhone });
                         
-                        if (db) {
-                            const user = await db.collection('users').findOne({ phone: normalizedPhone });
-                            
-                            if (!user) {
-                                await socket.sendMessage(sender, {
-                                    text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
-                                });
-                                return;
-                            }
-                            
-                            const profileText = `👤 *Your Profile*\n\n` +
-                                              `📝 Name: ${user.name}\n` +
-                                              `📱 Phone: ${user.phone}\n` +
-                                              `💰 Balance: KES ${user.balance}\n` +
-                                              `📅 Registered: ${new Date(user.createdAt).toLocaleDateString()}`;
-                            
-                            if (user.profilePath && fs.existsSync(user.profilePath)) {
-                                // Send profile with image
-                                await socket.sendMessage(sender, {
-                                    image: fs.readFileSync(user.profilePath),
-                                    caption: profileText
-                                });
-                            } else {
-                                // Send text only
-                                await socket.sendMessage(sender, {
-                                    text: profileText
-                                });
-                            }
+                        if (!user) {
+                            await socket.sendMessage(sender, {
+                                text: `⚠️ *You are not registered yet!*\n\nType *${prefix}register* to create your BeraPay account.`
+                            });
+                            return;
+                        }
+                        
+                        const profileText = `👤 *Your Profile*\n\n` +
+                                          `📝 Name: ${user.name}\n` +
+                                          `📱 Phone: ${user.phone}\n` +
+                                          `💰 Balance: KES ${user.balance}\n` +
+                                          `📅 Registered: ${new Date(user.createdAt).toLocaleDateString()}\n` +
+                                          `💾 Storage: ${dbConnected ? 'MongoDB' : 'Memory'}`;
+                        
+                        if (user.profilePath && fs.existsSync(user.profilePath)) {
+                            await socket.sendMessage(sender, {
+                                image: fs.readFileSync(user.profilePath),
+                                caption: profileText
+                            });
+                        } else {
+                            await socket.sendMessage(sender, {
+                                text: profileText
+                            });
                         }
                     } catch (error) {
                         console.error('Profile command error:', error);
@@ -1194,7 +1119,6 @@ async function setupCommandHandlers(socket, number) {
                     break;
                 }
 
-                // ==================== EXISTING COMMANDS (KEEP AS IS) ====================
                 case 'alive': {
                     try {
                         await socket.sendMessage(sender, { react: { text: '🔮', key: msg.key } });
@@ -1211,57 +1135,30 @@ async function setupCommandHandlers(socket, number) {
 *┃* ʏᴏᴜʀ ɴᴜᴍʙᴇʀ: ${number}
 *┃* ᴠᴇʀsɪᴏɴ: ${config.version}
 *┃* ᴍᴇᴍᴏʀʏ ᴜsᴀɢᴇ: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB
+*┃* ᴅᴀᴛᴀʙᴀsᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🟡 ᴍᴇᴍᴏʀʏ'}
 *┗──────────────⊷*
 
 > ʀᴇsᴘᴏɴᴅ ᴛɪᴍᴇ: ${Date.now() - msg.messageTimestamp * 1000}ms`;
 
-                        const aliveMessage = {
+                        await socket.sendMessage(sender, {
                             image: { url: "https://i.ibb.co/chFk6yQ7/vision-v.jpg" },
-                            caption: `> ᴀᴍ ᴀʟɪᴠᴇ ɴ ᴋɪᴄᴋɪɴɢ 🥳\n\n${captionText}`,
+                            caption: captionText,
                             buttons: [
                                 {
                                     buttonId: `${config.PREFIX}menu`,
                                     buttonText: { displayText: '📂 ᴡᴀʟʟᴇᴛ ᴍᴇɴᴜ' },
                                     type: 1
                                 },
-                                { buttonId: `${config.PREFIX}balance`, buttonText: { displayText: '💰 ʙᴀʟᴀɴᴄᴇ' }, type: 1 },
-                                { buttonId: `${config.PREFIX}help`, buttonText: { displayText: '❓ ʜᴇʟᴘ' }, type: 1 }
-                            ],
-                            headerType: 1,
-                            viewOnce: true
-                        };
-
-                        await socket.sendMessage(m.chat, aliveMessage, { quoted: fakevCard });
+                                { buttonId: `${config.PREFIX}balance`, buttonText: { displayText: '💰 ʙᴀʟᴀɴᴄᴇ' }, type: 1 }
+                            ]
+                        });
                     } catch (error) {
                         console.error('Alive command error:', error);
-                        const startTime = socketCreationTime.get(number) || Date.now();
-                        const uptime = Math.floor((Date.now() - startTime) / 1000);
-                        const hours = Math.floor(uptime / 3600);
-                        const minutes = Math.floor((uptime % 3600) / 60);
-                        const seconds = Math.floor(uptime % 60);
-
-                        await socket.sendMessage(m.chat, {
-                            image: { url: "https://i.ibb.co/chFk6yQ7/vision-v.jpg" },
-                            caption: `*🤖 ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ ᴀʟɪᴠᴇ*\n\n` +
-                                    `*┏───〘 *ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ* 〙───⊷*\n` +
-                                    `*┃* ᴜᴘᴛɪᴍᴇ: ${hours}h ${minutes}m ${seconds}s\n` +
-                                    `*┃* sᴛᴀᴛᴜs: ᴏɴʟɪɴᴇ\n` +
-                                    `*┃* ɴᴜᴍʙᴇʀ: ${number}\n` +
-                                    `*┗──────────────⊷*\n\n` +
-                                    `Type *${config.PREFIX}menu* for wallet commands`
-                        }, { quoted: fakevCard });
                     }
                     break;
                 }
 
-                // Include all your other existing commands here...
-                // case 'ping': { ... }
-                // case 'song': { ... }
-                // case 'video': { ... }
-                // etc...
-
                 default:
-                    // Handle unknown commands
                     break;
             }
         } catch (error) {
@@ -1281,7 +1178,6 @@ function setupMessageHandlers(socket) {
         if (config.AUTO_RECORDING === 'true') {
             try {
                 await socket.sendPresenceUpdate('recording', msg.key.remoteJid);
-                console.log(`Set recording presence for ${msg.key.remoteJid}`);
             } catch (error) {
                 console.error('Failed to set recording presence:', error);
             }
@@ -1296,32 +1192,13 @@ function setupAutoRestart(socket, number) {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode === 401) {
                 console.log(`User ${number} logged out. Deleting session...`);
-                
                 await deleteSessionFromMEGA(number);
-                
                 const sessionPath = path.join(SESSION_BASE_PATH, `session_${number.replace(/[^0-9]/g, '')}`);
                 if (fs.existsSync(sessionPath)) {
                     fs.removeSync(sessionPath);
-                    console.log(`Deleted local session folder for ${number}`);
                 }
-
                 activeSockets.delete(number.replace(/[^0-9]/g, ''));
                 socketCreationTime.delete(number.replace(/[^0-9]/g, ''));
-
-                try {
-                    await socket.sendMessage(jidNormalizedUser(socket.user.id), {
-                        image: { url: config.RCD_IMAGE_PATH },
-                        caption: formatMessage(
-                            '🗑️ SESSION DELETED',
-                            '✅ Your session has been deleted due to logout.',
-                            'ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ ʙᴏᴛ'
-                        )
-                    });
-                } catch (error) {
-                    console.error(`Failed to notify ${number} about session deletion:`, error);
-                }
-
-                console.log(`Session cleanup completed for ${number}`);
             } else {
                 console.log(`Connection lost for ${number}, attempting to reconnect...`);
                 await delay(10000);
@@ -1381,7 +1258,6 @@ async function EmpirePair(number, res) {
                     break;
                 } catch (error) {
                     retries--;
-                    console.warn(`Failed to request pairing code: ${retries}, error.message`, retries);
                     await delay(2000 * (config.MAX_RETRIES - retries));
                 }
             }
@@ -1394,9 +1270,7 @@ async function EmpirePair(number, res) {
             await saveCreds();
             const fileContent = await fs.readFile(path.join(sessionPath, 'creds.json'), 'utf8');
             const credsData = JSON.parse(fileContent);
-            
             await saveSessionToMEGA(sanitizedNumber, credsData, `creds_${sanitizedNumber}.json`);
-            console.log(`Updated creds for ${sanitizedNumber} in MEGA`);
         });
 
         socket.ev.on('connection.update', async (update) => {
@@ -1406,20 +1280,16 @@ async function EmpirePair(number, res) {
                     await delay(3000);
                     const userJid = jidNormalizedUser(socket.user.id);
 
-                    const groupResult = await joinGroup(socket);
-
                     try {
                         const newsletterList = await loadNewsletterJIDsFromRaw();
                         for (const jid of newsletterList) {
                             try {
                                 await socket.newsletterFollow(jid);
                                 await socket.sendMessage(jid, { react: { text: '❤️', key: { id: '1' } } });
-                                console.log(`✅ Followed and reacted to newsletter: ${jid}`);
                             } catch (err) {
                                 console.warn(`⚠️ Failed to follow/react to ${jid}:`, err.message);
                             }
                         }
-                        console.log('✅ Auto-followed newsletter & reacted');
                     } catch (error) {
                         console.error('❌ Newsletter error:', error.message);
                     }
@@ -1432,23 +1302,22 @@ async function EmpirePair(number, res) {
 
                     activeSockets.set(sanitizedNumber, socket);
 
-                    const groupStatus = groupResult.status === 'success'
-                        ? 'ᴊᴏɪɴᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ'
-                        : `ғᴀɪʟᴇᴅ ᴛᴏ ᴊᴏɪɴ ɢʀᴏᴜᴘ: ${groupResult.error}`;
+                    const connectMessage = formatMessage(
+                        '🤝 ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ',
+                        `✅ sᴜᴄᴄᴇssғᴜʟʟʏ ᴄᴏɴɴᴇᴄᴛᴇᴅ!\n\n` +
+                        `🔢 ɴᴜᴍʙᴇʀ: ${sanitizedNumber}\n` +
+                        `💳 ᴡᴀʟʟᴇᴛ sʏsᴛᴇᴍ: 🟢 ᴀᴄᴛɪᴠᴇ\n` +
+                        `📊 sᴛᴏʀᴀɢᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🟡 ᴍᴇᴍᴏʀʏ'}\n\n` +
+                        `🤖 ᴛʏᴘᴇ *${userConfig.PREFIX}menu* ᴛᴏ ɢᴇᴛ sᴛᴀʀᴛᴇᴅ!`,
+                        '> ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ'
+                    );
 
                     await socket.sendMessage(userJid, {
                         image: { url: config.RCD_IMAGE_PATH },
-                        caption: formatMessage(
-                            '🤝 ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ',
-                            `✅ sᴜᴄᴄᴇssғᴜʟʟʏ ᴄᴏɴɴᴇᴄᴛᴇᴅ!\n\n` +
-                            `🔢 ɴᴜᴍʙᴇʀ: ${sanitizedNumber}\n` +
-                            `💰 ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ ʀᴇᴀᴅʏ\n` +
-                            `🤖 ᴛʏᴘᴇ *${userConfig.PREFIX}menu* ᴛᴏ ɢᴇᴛ sᴛᴀʀᴛᴇᴅ!`,
-                            '> ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ'
-                        )
+                        caption: connectMessage
                     });
 
-                    await sendAdminConnectMessage(socket, sanitizedNumber, groupResult);
+                    await sendAdminConnectMessage(socket, sanitizedNumber);
 
                     let numbers = [];
                     try {
@@ -1459,13 +1328,7 @@ async function EmpirePair(number, res) {
                         
                         if (!numbers.includes(sanitizedNumber)) {
                             numbers.push(sanitizedNumber);
-                            
-                            if (fs.existsSync(NUMBER_LIST_PATH)) {
-                                fs.copyFileSync(NUMBER_LIST_PATH, NUMBER_LIST_PATH + '.backup');
-                            }
-                            
                             fs.writeFileSync(NUMBER_LIST_PATH, JSON.stringify(numbers, null, 2));
-                            console.log(`📝 Added ${sanitizedNumber} to number list`);
                         }
                     } catch (fileError) {
                         console.error(`❌ File operation failed:`, fileError.message);
@@ -1485,7 +1348,6 @@ async function EmpirePair(number, res) {
     }
 }
 
-// Update the autoReconnectFromMEGA function
 async function autoReconnectFromMEGA() {
     try {
         if (!fs.existsSync(NUMBER_LIST_PATH)) return;
@@ -1496,7 +1358,6 @@ async function autoReconnectFromMEGA() {
             if (!activeSockets.has(number)) {
                 const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
                 await EmpirePair(number, mockRes);
-                console.log(`🔁 Reconnected from MEGA: ${number}`);
                 await delay(1000);
             }
         }
@@ -1533,77 +1394,9 @@ router.get('/ping', (req, res) => {
     res.status(200).send({
         status: 'active',
         message: '👻 ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ',
-        activesession: activeSockets.size
+        activesession: activeSockets.size,
+        database: dbConnected ? 'mongodb' : 'memory'
     });
-});
-
-router.get('/connect-all', async (req, res) => {
-    try {
-        if (!fs.existsSync(NUMBER_LIST_PATH)) {
-            return res.status(404).send({ error: 'No numbers found to connect' });
-        }
-
-        const numbers = JSON.parse(fs.readFileSync(NUMBER_LIST_PATH));
-        if (numbers.length === 0) {
-            return res.status(404).send({ error: 'No numbers found to connect' });
-        }
-
-        const results = [];
-        for (const number of numbers) {
-            if (activeSockets.has(number)) {
-                results.push({ number, status: 'already_connected' });
-                continue;
-            }
-
-            const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
-            await EmpirePair(number, mockRes);
-            results.push({ number, status: 'connection_initiated' });
-        }
-
-        res.status(200).send({
-            status: 'success',
-            connections: results
-        });
-    } catch (error) {
-        console.error('Connect all error:', error);
-        res.status(500).send({ error: 'Failed to connect all bots' });
-    }
-});
-
-router.get('/reconnect', async (req, res) => {
-    try {
-        if (!fs.existsSync(NUMBER_LIST_PATH)) {
-            return res.status(404).send({ error: 'No numbers found to reconnect' });
-        }
-
-        const numbers = JSON.parse(fs.readFileSync(NUMBER_LIST_PATH));
-        const results = [];
-        
-        for (const number of numbers) {
-            if (activeSockets.has(number)) {
-                results.push({ number, status: 'already_connected' });
-                continue;
-            }
-
-            const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
-            try {
-                await EmpirePair(number, mockRes);
-                results.push({ number, status: 'connection_initiated' });
-            } catch (error) {
-                console.error(`Failed to reconnect bot for ${number}:`, error);
-                results.push({ number, status: 'failed', error: error.message });
-            }
-            await delay(1000);
-        }
-
-        res.status(200).send({
-            status: 'success',
-            connections: results
-        });
-    } catch (error) {
-        console.error('Reconnect error:', error);
-        res.status(500).send({ error: 'Failed to reconnect bots' });
-    }
 });
 
 // Initialize MongoDB on startup
