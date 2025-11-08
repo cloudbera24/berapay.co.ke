@@ -1,4 +1,4 @@
-const Mega = require('megajs');
+const { storage } = require('megajs');
 const fs = require('fs-extra');
 const path = require('path');
 
@@ -7,151 +7,183 @@ class MegaStorage {
         this.email = email;
         this.password = password;
         this.storage = null;
-        this.initialized = false;
+        this.isAuthenticated = false;
+        this.retryCount = 0;
+        this.maxRetries = 3;
     }
 
     async initialize() {
-        if (this.initialized) return;
-        
-        this.storage = await new Promise((resolve, reject) => {
-            const storage = new Mega({
+        try {
+            console.log('🔄 Initializing MEGA storage...');
+            
+            // Clear any existing sessions first
+            await this.clearLocalSessions();
+            
+            this.storage = await storage.login({
                 email: this.email,
-                password: this.password
+                password: this.password,
+                keepalive: true
             });
             
-            storage.on('ready', () => {
-                console.log('MEGA storage initialized successfully');
-                resolve(storage);
-            });
+            this.isAuthenticated = true;
+            this.retryCount = 0;
+            console.log('✅ MEGA storage authenticated successfully');
+            return true;
             
-            storage.on('error', (error) => {
-                console.error('MEGA initialization error:', error);
-                reject(error);
-            });
-        });
-        
-        this.initialized = true;
-    }
-
-    async uploadFile(filePath, remoteFilename) {
-        await this.initialize();
-        
-        return new Promise((resolve, reject) => {
-            // Get file stats to determine size
-            fs.stat(filePath, (err, stats) => {
-                if (err) return reject(err);
-                
-                const readStream = fs.createReadStream(filePath);
-                this.storage.upload({
-                    name: remoteFilename,
-                    size: stats.size, // Provide file size
-                    allowUploadBuffering: true // Enable buffering
-                }, readStream).exec((err, file) => {
-                    if (err) return reject(err);
-                    resolve(file);
-                });
-            });
-        });
-    }
-
-    async uploadBuffer(buffer, remoteFilename) {
-        await this.initialize();
-        
-        return new Promise((resolve, reject) => {
-            this.storage.upload({
-                name: remoteFilename,
-                size: buffer.length,
-                allowUploadBuffering: true
-            }, buffer).exec((err, file) => {
-                if (err) return reject(err);
-                resolve(file);
-            });
-        });
-    }
-
-    async downloadFile(remoteFilename, localPath) {
-        await this.initialize();
-        
-        return new Promise((resolve, reject) => {
-            const files = this.storage.files;
-            const file = Object.values(files).find(f => f.name === remoteFilename);
+        } catch (error) {
+            console.error('❌ MEGA storage initialization failed:', error.message);
+            this.retryCount++;
             
-            if (!file) {
-                return reject(new Error('File not found'));
+            if (this.retryCount <= this.maxRetries) {
+                console.log(`🔄 Retrying MEGA login (attempt ${this.retryCount}/${this.maxRetries})...`);
+                await this.delay(2000 * this.retryCount);
+                return await this.initialize();
             }
             
-            file.download((err, data) => {
-                if (err) return reject(err);
-                
-                fs.ensureDirSync(path.dirname(localPath));
-                fs.writeFileSync(localPath, data);
-                resolve(localPath);
-            });
-        });
+            throw new Error(`MEGA authentication failed after ${this.maxRetries} attempts: ${error.message}`);
+        }
     }
 
-    async downloadBuffer(remoteFilename) {
-        await this.initialize();
+    async ensureAuthenticated() {
+        if (!this.isAuthenticated || !this.storage) {
+            return await this.initialize();
+        }
         
-        return new Promise((resolve, reject) => {
-            const files = this.storage.files;
-            const file = Object.values(files).find(f => f.name === remoteFilename);
+        try {
+            // Test connection by listing root directory
+            await this.storage.root;
+            return true;
+        } catch (error) {
+            console.log('🔄 MEGA session expired, reauthenticating...');
+            this.isAuthenticated = false;
+            return await this.initialize();
+        }
+    }
+
+    async uploadBuffer(buffer, filename) {
+        try {
+            await this.ensureAuthenticated();
+            
+            // Convert buffer to readable stream
+            const { Readable } = require('stream');
+            const stream = Readable.from(buffer);
+            
+            const file = await this.storage.upload(filename, stream).complete;
+            console.log(`✅ File uploaded to MEGA: ${filename}`);
+            return file;
+            
+        } catch (error) {
+            console.error('❌ MEGA upload failed:', error.message);
+            throw error;
+        }
+    }
+
+    async downloadBuffer(filename) {
+        try {
+            await this.ensureAuthenticated();
+            
+            const files = await this.storage.root.children;
+            const file = files.find(f => f.name === filename);
             
             if (!file) {
-                return reject(new Error('File not found'));
+                console.log(`❌ File not found in MEGA: ${filename}`);
+                return null;
             }
             
-            file.download((err, data) => {
-                if (err) return reject(err);
-                resolve(data);
+            const downloadStream = file.download();
+            const chunks = [];
+            
+            return new Promise((resolve, reject) => {
+                downloadStream.on('data', chunk => chunks.push(chunk));
+                downloadStream.on('end', () => resolve(Buffer.concat(chunks)));
+                downloadStream.on('error', reject);
             });
-        });
+            
+        } catch (error) {
+            console.error('❌ MEGA download failed:', error.message);
+            return null;
+        }
     }
 
     async listFiles() {
-        await this.initialize();
-        
-        return Object.values(this.storage.files).map(file => file.name);
+        try {
+            await this.ensureAuthenticated();
+            const files = await this.storage.root.children;
+            return files.map(file => file.name);
+        } catch (error) {
+            console.error('❌ MEGA list files failed:', error.message);
+            return [];
+        }
     }
 
-    async deleteFile(remoteFilename) {
-        await this.initialize();
-        
-        return new Promise((resolve, reject) => {
-            const files = this.storage.files;
-            const file = Object.values(files).find(f => f.name === remoteFilename);
+    async deleteFile(filename) {
+        try {
+            await this.ensureAuthenticated();
             
-            if (!file) return resolve(false);
+            const files = await this.storage.root.children;
+            const file = files.find(f => f.name === filename);
             
-            file.delete((err) => {
-                if (err) return reject(err);
-                resolve(true);
-            });
-        });
+            if (file) {
+                await file.delete();
+                console.log(`✅ File deleted from MEGA: ${filename}`);
+                return true;
+            }
+            
+            console.log(`❌ File not found for deletion: ${filename}`);
+            return false;
+            
+        } catch (error) {
+            console.error('❌ MEGA delete failed:', error.message);
+            return false;
+        }
     }
 
-    async fileExists(remoteFilename) {
-        await this.initialize();
-        
-        const files = this.storage.files;
-        return Object.values(files).some(file => file.name === remoteFilename);
+    async fileExists(filename) {
+        try {
+            await this.ensureAuthenticated();
+            const files = await this.storage.root.children;
+            return files.some(file => file.name === filename);
+        } catch (error) {
+            console.error('❌ MEGA file exists check failed:', error.message);
+            return false;
+        }
     }
 
-    // Helper method to get file link
-    async getFileLink(remoteFilename) {
-        await this.initialize();
-        
-        return new Promise((resolve, reject) => {
-            const files = this.storage.files;
-            const file = Object.values(files).find(f => f.name === remoteFilename);
+    async clearLocalSessions() {
+        try {
+            // Clear any local MEGA session files that might be causing conflicts
+            const sessionFiles = await fs.readdir('.').catch(() => []);
+            const megaSessionFiles = sessionFiles.filter(file => 
+                file.startsWith('megajs_') || 
+                file.includes('mega_session') ||
+                file.endsWith('.megajs')
+            );
             
-            if (!file) return reject(new Error('File not found'));
+            for (const file of megaSessionFiles) {
+                await fs.unlink(file).catch(() => {});
+            }
             
-            file.link((err, link) => {
-                if (err) return reject(err);
-                resolve(link);
-            });
-        });
+            console.log('🧹 Cleared local MEGA session files');
+        } catch (error) {
+            console.log('ℹ️ No local MEGA sessions to clear');
+        }
+    }
+
+    delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async logout() {
+        try {
+            if (this.storage) {
+                await this.storage.logout();
+            }
+            this.isAuthenticated = false;
+            this.storage = null;
+            console.log('✅ MEGA storage logged out');
+        } catch (error) {
+            console.error('MEGA logout error:', error.message);
+        }
     }
 }
 
