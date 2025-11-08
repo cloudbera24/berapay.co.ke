@@ -37,7 +37,7 @@ const config = {
     OWNER_NUMBER: '254740007567',
     BOT_FOOTER: 'ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ',
     MEGA_EMAIL: 'beratech00@gmail.com',
-    MEGA_PASSWORD: 'brucebera7824_',
+    MEGA_PASSWORD: 'brucebera7824_1',
     // PayHero Configuration from .env
     PAYHERO_BASE_URL: process.env.PAYHERO_BASE_URL,
     PAYHERO_AUTH_TOKEN: process.env.PAYHERO_AUTH_TOKEN,
