@@ -15,10 +15,12 @@ class MegaStorage {
     async initialize() {
         try {
             console.log('🔄 Initializing MEGA storage...');
+            console.log(`📧 Using email: ${this.email}`);
             
             // Clear any existing sessions first
             await this.clearLocalSessions();
             
+            // Initialize MEGA storage with proper error handling
             this.storage = await storage.login({
                 email: this.email,
                 password: this.password,
@@ -50,7 +52,7 @@ class MegaStorage {
         }
         
         try {
-            // Test connection by listing root directory
+            // Test connection by accessing root
             await this.storage.root;
             return true;
         } catch (error) {
@@ -161,9 +163,10 @@ class MegaStorage {
             
             for (const file of megaSessionFiles) {
                 await fs.unlink(file).catch(() => {});
+                console.log(`🧹 Deleted local session file: ${file}`);
             }
             
-            console.log('🧹 Cleared local MEGA session files');
+            console.log('✅ Cleared local MEGA session files');
         } catch (error) {
             console.log('ℹ️ No local MEGA sessions to clear');
         }
