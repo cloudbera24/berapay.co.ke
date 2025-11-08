@@ -133,7 +133,7 @@ const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6ty
 let db;
 let dbConnected = false;
 
-// Initialize MongoDB - FIXED NULL PHONE ISSUE
+// Initialize MongoDB - FIXED INDEX ISSUE
 async function initMongoDB() {
     try {
         console.log('🔗 Connecting to MongoDB...');
@@ -163,32 +163,24 @@ async function initMongoDB() {
             // Get existing indexes
             const userIndexes = await usersCollection.indexes();
             
-            // Drop existing phone index if it exists with wrong properties
-            const existingPhoneIndex = userIndexes.find(index => 
-                index.name === 'phone_1_unique' || 
-                (index.key && index.key.phone === 1)
+            // Create phone index with simple configuration
+            const phoneIndexExists = userIndexes.some(index => 
+                index.name === 'phone_1_unique'
             );
             
-            if (existingPhoneIndex) {
-                try {
-                    await usersCollection.dropIndex(existingPhoneIndex.name);
-                    console.log('🔄 Dropped existing phone index');
-                } catch (dropError) {
-                    console.log('ℹ️ Could not drop existing index, may not exist:', dropError.message);
-                }
+            if (!phoneIndexExists) {
+                await usersCollection.createIndex({ phone: 1 }, { 
+                    unique: true, 
+                    name: 'phone_1_unique',
+                    background: true
+                });
+                console.log('✅ Created unique phone index for users');
+            } else {
+                console.log('✅ Phone index already exists');
             }
             
-            // Create new phone index with proper configuration
-            await usersCollection.createIndex({ phone: 1 }, { 
-                unique: true, 
-                name: 'phone_1_unique',
-                background: true,
-                partialFilterExpression: { phone: { $exists: true, $ne: null } }
-            });
-            console.log('✅ Created unique phone index for users');
-            
         } catch (indexError) {
-            console.log('ℹ️ Index creation issue (may already exist):', indexError.message);
+            console.log('ℹ️ Users index creation issue:', indexError.message);
         }
         
         // Create transactions indexes
