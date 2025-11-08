@@ -34,10 +34,10 @@ const config = {
     ADMIN_LIST_PATH: './admin.json',
     RCD_IMAGE_PATH: 'https://i.ibb.co/chFk6yQ7/vision-v.jpg',
     version: '2.0.0',
-    OWNER_NUMBER: '254740007567',
+    OWNER_NUMBER: process.env.OWNER_NUMBER || '254740007567',
     BOT_FOOTER: 'ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʙᴇʀᴀᴘᴀʏ',
-    MEGA_EMAIL: 'beratech00@gmail.com',
-    MEGA_PASSWORD: 'brucebera7824_1',
+    MEGA_EMAIL: process.env.MEGA_EMAIL,
+    MEGA_PASSWORD: process.env.MEGA_PASSWORD,
     // PayHero Configuration from .env
     PAYHERO_BASE_URL: process.env.PAYHERO_BASE_URL,
     PAYHERO_AUTH_TOKEN: process.env.PAYHERO_AUTH_TOKEN,
@@ -67,7 +67,7 @@ function validateConfig() {
     return true;
 }
 
-// Initialize MEGA storage with fallback
+// Initialize MEGA storage with fallback - FIXED VERSION
 class LocalStorage {
     constructor() {
         this.localPath = './sessions';
@@ -110,14 +110,31 @@ class LocalStorage {
     }
 }
 
+// FIXED MEGA Storage Initialization with proper error handling
 let storage;
-try {
-    storage = new MegaStorage(config.MEGA_EMAIL, config.MEGA_PASSWORD);
-    console.log('✅ MEGA storage initialized successfully');
-} catch (error) {
-    console.error('❌ MEGA storage failed, using local fallback:', error.message);
-    storage = new LocalStorage();
+let usingMEGA = false;
+
+async function initializeStorage() {
+    try {
+        console.log('🔄 Initializing storage system...');
+        
+        // Try MEGA first
+        storage = new MegaStorage(config.MEGA_EMAIL, config.MEGA_PASSWORD);
+        
+        // Test MEGA connection
+        await storage.initialize();
+        usingMEGA = true;
+        console.log('✅ MEGA storage initialized successfully');
+        
+    } catch (error) {
+        console.error('❌ MEGA storage failed, using local fallback:', error.message);
+        storage = new LocalStorage();
+        usingMEGA = false;
+    }
 }
+
+// Initialize storage when module loads
+initializeStorage();
 
 const activeSockets = new Map();
 const socketCreationTime = new Map();
@@ -222,6 +239,153 @@ async function initMongoDB() {
         dbConnected = false;
     }
 }
+
+// FIXED Session Management Functions
+async function saveSessionToMEGA(number, sessionData, filename) {
+    try {
+        const sanitizedNumber = number.replace(/[^0-9]/g, '');
+        const buffer = Buffer.from(JSON.stringify(sessionData, null, 2));
+        
+        if (usingMEGA) {
+            await storage.uploadBuffer(buffer, filename);
+        } else {
+            await storage.uploadBuffer(buffer, filename);
+        }
+        
+        console.log(`✅ Session saved: ${filename}`);
+        return true;
+    } catch (error) {
+        console.error('❌ Failed to save session:', error.message);
+        
+        // Fallback to local storage
+        if (usingMEGA) {
+            console.log('🔄 Falling back to local storage for session saving');
+            const localFallback = new LocalStorage();
+            await localFallback.uploadBuffer(buffer, filename);
+        }
+        
+        return false;
+    }
+}
+
+async function loadSessionFromMEGA(filename) {
+    try {
+        let data;
+        
+        if (usingMEGA) {
+            data = await storage.downloadBuffer(filename);
+        } else {
+            data = await storage.downloadBuffer(filename);
+        }
+        
+        return data ? JSON.parse(data.toString('utf8')) : null;
+    } catch (error) {
+        console.error('❌ Failed to load session:', error.message);
+        
+        // Try local fallback
+        try {
+            const localFallback = new LocalStorage();
+            const data = await localFallback.downloadBuffer(filename);
+            return data ? JSON.parse(data.toString('utf8')) : null;
+        } catch (fallbackError) {
+            return null;
+        }
+    }
+}
+
+async function deleteSessionFromMEGA(number) {
+    try {
+        const sanitizedNumber = number.replace(/[^0-9]/g, '');
+        let files = [];
+        
+        if (usingMEGA) {
+            files = await storage.listFiles();
+        } else {
+            files = await storage.listFiles();
+        }
+        
+        const sessionFiles = files.filter(filename =>
+            filename.includes(sanitizedNumber) && filename.endsWith('.json')
+        );
+
+        for (const file of sessionFiles) {
+            if (usingMEGA) {
+                await storage.deleteFile(file);
+            } else {
+                await storage.deleteFile(file);
+            }
+            console.log(`✅ Deleted session file: ${file}`);
+        }
+
+        // Also clean local numbers list
+        let numbers = [];
+        if (fs.existsSync(NUMBER_LIST_PATH)) {
+            numbers = JSON.parse(fs.readFileSync(NUMBER_LIST_PATH, 'utf8'));
+            numbers = numbers.filter(n => n !== sanitizedNumber);
+            fs.writeFileSync(NUMBER_LIST_PATH, JSON.stringify(numbers, null, 2));
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('❌ Failed to delete session:', error.message);
+        return false;
+    }
+}
+
+async function restoreSession(number) {
+    try {
+        const sanitizedNumber = number.replace(/[^0-9]/g, '');
+        let files = [];
+        
+        if (usingMEGA) {
+            files = await storage.listFiles();
+        } else {
+            files = await storage.listFiles();
+        }
+        
+        const sessionFiles = files.filter(filename =>
+            filename === `creds_${sanitizedNumber}.json`
+        );
+
+        if (sessionFiles.length === 0) {
+            console.log(`❌ No session found for: ${sanitizedNumber}`);
+            return null;
+        }
+        
+        const session = await loadSessionFromMEGA(sessionFiles[0]);
+        if (session) {
+            console.log(`✅ Session restored for: ${sanitizedNumber}`);
+        }
+        return session;
+    } catch (error) {
+        console.error('❌ Session restore failed:', error.message);
+        return null;
+    }
+}
+
+// Storage health check
+async function checkStorageHealth() {
+    try {
+        if (usingMEGA) {
+            await storage.ensureAuthenticated();
+            const files = await storage.listFiles();
+            console.log(`✅ MEGA Storage Health: OK (${files.length} files)`);
+            return true;
+        } else {
+            const files = await storage.listFiles();
+            console.log(`✅ Local Storage Health: OK (${files.length} files)`);
+            return true;
+        }
+    } catch (error) {
+        console.error('❌ Storage Health Check Failed:', error.message);
+        return false;
+    }
+}
+
+// Periodic health check (every 5 minutes)
+setInterval(() => {
+    checkStorageHealth().catch(console.error);
+}, 5 * 60 * 1000);
 
 // Real PayHero API Functions
 async function initiateSTKPush(phone, amount, reference) {
@@ -480,70 +644,6 @@ async function cleanDuplicateFiles(number) {
     }
 }
 
-async function saveSessionToMEGA(number, sessionData, filename) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        const buffer = Buffer.from(JSON.stringify(sessionData, null, 2));
-        await storage.uploadBuffer(buffer, filename);
-        console.log(`Session saved: ${filename}`);
-    } catch (error) {
-        console.error('Failed to save session:', error);
-        throw error;
-    }
-}
-
-async function loadSessionFromMEGA(filename) {
-    try {
-        const data = await storage.downloadBuffer(filename);
-        return data ? JSON.parse(data.toString('utf8')) : null;
-    } catch (error) {
-        console.error('Failed to load session:', error);
-        return null;
-    }
-}
-
-async function deleteSessionFromMEGA(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        const files = await storage.listFiles();
-        
-        const sessionFiles = files.filter(filename =>
-            filename.includes(sanitizedNumber) && filename.endsWith('.json')
-        );
-
-        for (const file of sessionFiles) {
-            await storage.deleteFile(file);
-            console.log(`Deleted session file: ${file}`);
-        }
-
-        let numbers = [];
-        if (fs.existsSync(NUMBER_LIST_PATH)) {
-            numbers = JSON.parse(fs.readFileSync(NUMBER_LIST_PATH, 'utf8'));
-            numbers = numbers.filter(n => n !== sanitizedNumber);
-            fs.writeFileSync(NUMBER_LIST_PATH, JSON.stringify(numbers, null, 2));
-        }
-    } catch (error) {
-        console.error('Failed to delete session:', error);
-    }
-}
-
-async function restoreSession(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        const files = await storage.listFiles();
-        
-        const sessionFiles = files.filter(filename =>
-            filename === `creds_${sanitizedNumber}.json`
-        );
-
-        if (sessionFiles.length === 0) return null;
-        return await loadSessionFromMEGA(sessionFiles[0]);
-    } catch (error) {
-        console.error('Session restore failed:', error);
-        return null;
-    }
-}
-
 async function sendAdminConnectMessage(socket, number) {
     const admins = loadAdmins();
     const caption = formatMessage(
@@ -572,17 +672,29 @@ function setupAutoRestart(socket, number) {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            if (statusCode === 401) {
-                console.log(`User ${number} logged out. Deleting session...`);
+            const errorMessage = lastDisconnect?.error?.message;
+            
+            console.log(`🔌 Connection closed for ${number}:`, {
+                statusCode,
+                errorMessage,
+                usingMEGA
+            });
+            
+            if (statusCode === 401 || errorMessage?.includes('ENOENT') || errorMessage?.includes('Wrong password')) {
+                console.log(`🚫 User ${number} logged out or session invalid. Deleting session...`);
                 await deleteSessionFromMEGA(number);
+                
+                // Also clean local session directory
                 const sessionPath = path.join(SESSION_BASE_PATH, `session_${number.replace(/[^0-9]/g, '')}`);
                 if (fs.existsSync(sessionPath)) {
-                    fs.removeSync(sessionPath);
+                    await fs.remove(sessionPath);
                 }
+                
                 activeSockets.delete(number.replace(/[^0-9]/g, ''));
                 socketCreationTime.delete(number.replace(/[^0-9]/g, ''));
+                
             } else {
-                console.log(`Connection lost for ${number}, will auto-reconnect on next message`);
+                console.log(`🔁 Connection lost for ${number}, will auto-reconnect on next message`);
                 activeSockets.delete(number.replace(/[^0-9]/g, ''));
                 socketCreationTime.delete(number.replace(/[^0-9]/g, ''));
             }
@@ -913,6 +1025,102 @@ function setupTransactionReplyHandler(socket) {
     });
 }
 
+// Quick deposit handler
+async function handleQuickDeposit(socket, sender, amount) {
+    try {
+        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+        const user = await dbOps.findUser({ phone: normalizedPhone });
+        
+        if (!user) {
+            await socket.sendMessage(sender, {
+                text: `❌ You're not registered! Please use *${config.PREFIX}register* first.`
+            });
+            return;
+        }
+
+        if (amount < 10 || amount > 70000) {
+            await socket.sendMessage(sender, {
+                text: `❌ Amount must be between KES 10 and KES 70,000`
+            });
+            return;
+        }
+
+        const reference = generateTransactionReference();
+        
+        await socket.sendMessage(sender, {
+            text: `🔄 *Initiating Deposit...*\n\nAmount: ${formatCurrency(amount)}\nPlease wait...`
+        });
+
+        const depositResult = await initiateSTKPush(normalizedPhone, amount, reference);
+        
+        if (depositResult.success) {
+            const transaction = {
+                sender: normalizedPhone,
+                receiver: 'SYSTEM',
+                amount: amount,
+                type: 'deposit',
+                status: 'pending',
+                reference: reference,
+                checkoutRequestId: depositResult.checkoutRequestId,
+                createdAt: new Date(),
+                updatedAt: new Date()
+            };
+            
+            await dbOps.insertTransaction(transaction);
+            pendingTransactions.set(reference, { socket, sender, phone: normalizedPhone, amount, type: 'deposit' });
+            
+            await socket.sendMessage(sender, {
+                text: `✅ *Deposit Initiated!*\n\nAmount: ${formatCurrency(amount)}\nReference: ${reference}\n\nPlease check your phone to complete the payment.`
+            });
+            
+        } else {
+            await socket.sendMessage(sender, {
+                text: `❌ *Deposit Failed!*\n\nError: ${depositResult.error}\n\nPlease try again later.`
+            });
+        }
+        
+    } catch (error) {
+        console.error('Quick deposit error:', error);
+        await socket.sendMessage(sender, {
+            text: `❌ Failed to process deposit. Please try again.`
+        });
+    }
+}
+
+// Quick withdrawal handler
+async function handleQuickWithdraw(socket, sender, amount) {
+    try {
+        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+        const user = await dbOps.findUser({ phone: normalizedPhone });
+        
+        if (!user) {
+            await socket.sendMessage(sender, {
+                text: `❌ You're not registered! Please use *${config.PREFIX}register* first.`
+            });
+            return;
+        }
+
+        if (amount > user.balance) {
+            await socket.sendMessage(sender, {
+                text: `❌ Insufficient balance! You have ${formatCurrency(user.balance)}`
+            });
+            return;
+        }
+
+        transactionState.set(sender, { type: 'withdraw', step: 1, amount: amount });
+        
+        await socket.sendMessage(sender, {
+            text: `📤 *Withdrawal - Step 1/2*\n\nAmount: ${formatCurrency(amount)}\n\nPlease enter your 4-digit PIN to continue:`
+        });
+        
+    } catch (error) {
+        console.error('Quick withdraw error:', error);
+        await socket.sendMessage(sender, {
+            text: `❌ Failed to process withdrawal. Please try again.`
+        });
+    }
+}
+
 async function setupCommandHandlers(socket, number) {
     socket.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
@@ -991,7 +1199,7 @@ async function setupCommandHandlers(socket, number) {
                                     },
                                     {
                                         title: "👤 Profile",
-                                        description: "View your profile",
+                                        description: "View your profile information",
                                         rowId: `${config.PREFIX}profile`
                                     }
                                 ]
@@ -1000,8 +1208,8 @@ async function setupCommandHandlers(socket, number) {
                                 title: "Transactions",
                                 rows: [
                                     {
-                                        title: "📥 Deposit",
-                                        description: "Add money via STK Push",
+                                        title: "💵 Deposit",
+                                        description: "Add money to your wallet",
                                         rowId: `${config.PREFIX}deposit`
                                     },
                                     {
@@ -1010,19 +1218,38 @@ async function setupCommandHandlers(socket, number) {
                                         rowId: `${config.PREFIX}withdraw`
                                     },
                                     {
-                                        title: "💸 Send Money",
-                                        description: "Send to other users",
+                                        title: "🔄 Send Money",
+                                        description: "Send to another user",
                                         rowId: `${config.PREFIX}send`
                                     },
                                     {
-                                        title: "📜 History",
+                                        title: "📋 History",
                                         description: "Transaction history",
-                                        rowId: `${config.PREFIX}transactions`
+                                        rowId: `${config.PREFIX}history`
+                                    }
+                                ]
+                            },
+                            {
+                                title: "Quick Actions",
+                                rows: [
+                                    {
+                                        title: "💵 Deposit 100",
+                                        description: "Quick deposit KES 100",
+                                        rowId: `${config.PREFIX}100`
+                                    },
+                                    {
+                                        title: "💵 Deposit 500", 
+                                        description: "Quick deposit KES 500",
+                                        rowId: `${config.PREFIX}500`
+                                    },
+                                    {
+                                        title: "💵 Deposit 1000",
+                                        description: "Quick deposit KES 1000",
+                                        rowId: `${config.PREFIX}1000`
                                     }
                                 ]
                             }
-                        ],
-                        headerType: 1
+                        ]
                     };
                     
                     await socket.sendMessage(sender, menuMessage);
@@ -1030,43 +1257,270 @@ async function setupCommandHandlers(socket, number) {
                 }
 
                 case 'register': {
-                    const userState = registrationState.get(sender);
-                    
-                    if (!userState) {
-                        // Check if already registered
-                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                        const existingUser = await dbOps.findUser({ phone: normalizedPhone });
-                        
-                        if (existingUser) {
-                            await socket.sendMessage(sender, {
-                                text: `✅ *Already Registered!*\n\nYou are already registered as ${existingUser.name}.\n\nUse *${config.PREFIX}login* to access your account.`
-                            });
-                            return;
-                        }
-
-                        registrationState.set(sender, { step: 1 });
+                    if (registrationState.has(sender)) {
                         await socket.sendMessage(sender, {
-                            text: `📝 *Registration - Step 1/3*\n\nPlease enter your full name:\n\nExample: *Bruce Bera*`
+                            text: `❌ Registration already in progress! Please complete it first.`
                         });
+                        return;
                     }
+
+                    const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                    const existingUser = await dbOps.findUser({ phone: normalizedPhone });
+                    
+                    if (existingUser) {
+                        await socket.sendMessage(sender, {
+                            text: `✅ You're already registered!\n\nName: ${existingUser.name}\nBalance: ${formatCurrency(existingUser.balance)}\n\nUse *${config.PREFIX}login* to access your account.`
+                        });
+                        return;
+                    }
+
+                    registrationState.set(sender, {
+                        step: 1,
+                        name: '',
+                        pin: '',
+                        profilePath: null
+                    });
+
+                    await socket.sendMessage(sender, {
+                        text: `📝 *Registration - Step 1/3*\n\nWelcome to BeraPay! Let's create your account.\n\nPlease enter your full name:`
+                    });
                     break;
                 }
 
                 case 'login': {
+                    if (loginState.has(sender)) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ Login already in progress! Please complete it first.`
+                        });
+                        return;
+                    }
+
                     const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
                     const user = await dbOps.findUser({ phone: normalizedPhone });
                     
                     if (!user) {
                         await socket.sendMessage(sender, {
-                            text: `❌ *Not Registered!*\n\nPlease register first using *${config.PREFIX}register*`
+                            text: `❌ You're not registered! Please use *${config.PREFIX}register* to create an account.`
                         });
                         return;
                     }
 
                     loginState.set(sender, { step: 1 });
+                    
                     await socket.sendMessage(sender, {
                         text: `🔐 *Login*\n\nPlease enter your 4-digit PIN:`
                     });
+                    break;
+                }
+
+                case 'balance': {
+                    const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                    const user = await dbOps.findUser({ phone: normalizedPhone });
+                    
+                    if (!user) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ You're not registered! Please use *${config.PREFIX}register* to create an account.`
+                        });
+                        return;
+                    }
+
+                    await socket.sendMessage(sender, {
+                        text: `💰 *Account Balance*\n\nName: ${user.name}\nPhone: ${user.phone}\nBalance: ${formatCurrency(user.balance)}\n\nLast updated: ${moment(user.updatedAt).format('DD/MM/YYYY HH:mm')}`
+                    });
+                    break;
+                }
+
+                case 'deposit': {
+                    const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                    const user = await dbOps.findUser({ phone: normalizedPhone });
+                    
+                    if (!user) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ You're not registered! Please use *${config.PREFIX}register* to create an account.`
+                        });
+                        return;
+                    }
+
+                    await socket.sendMessage(sender, {
+                        text: `💵 *Deposit Funds*\n\nTo deposit funds, please send the amount you want to deposit.\n\nExample: Send *100* to deposit KES 100\n\nMinimum: KES 10\nMaximum: KES 70,000\n\nYour current balance: ${formatCurrency(user.balance)}`,
+                        buttons: [
+                            {
+                                buttonId: `${config.PREFIX}100`,
+                                buttonText: { displayText: '💵 100' },
+                                type: 1
+                            },
+                            {
+                                buttonId: `${config.PREFIX}500`,
+                                buttonText: { displayText: '💵 500' },
+                                type: 1
+                            },
+                            {
+                                buttonId: `${config.PREFIX}1000`,
+                                buttonText: { displayText: '💵 1000' },
+                                type: 1
+                            }
+                        ]
+                    });
+                    break;
+                }
+
+                case 'withdraw': {
+                    const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                    const user = await dbOps.findUser({ phone: normalizedPhone });
+                    
+                    if (!user) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ You're not registered! Please use *${config.PREFIX}register* to create an account.`
+                        });
+                        return;
+                    }
+
+                    if (user.balance < 10) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ Insufficient balance! Minimum withdrawal is KES 10.\n\nYour balance: ${formatCurrency(user.balance)}`
+                        });
+                        return;
+                    }
+
+                    transactionState.set(sender, {
+                        type: 'withdraw',
+                        step: 1,
+                        amount: 0
+                    });
+
+                    await socket.sendMessage(sender, {
+                        text: `📤 *Withdraw Funds*\n\nPlease enter the amount to withdraw:\n\nYour balance: ${formatCurrency(user.balance)}\nMinimum: KES 10\nMaximum: KES 50,000`,
+                        buttons: [
+                            {
+                                buttonId: `${config.PREFIX}withdraw_100`,
+                                buttonText: { displayText: '💵 100' },
+                                type: 1
+                            },
+                            {
+                                buttonId: `${config.PREFIX}withdraw_500`,
+                                buttonText: { displayText: '💵 500' },
+                                type: 1
+                            },
+                            {
+                                buttonId: `${config.PREFIX}withdraw_1000`,
+                                buttonText: { displayText: '💵 1000' },
+                                type: 1
+                            }
+                        ]
+                    });
+                    break;
+                }
+
+                case 'history': {
+                    const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                    const user = await dbOps.findUser({ phone: normalizedPhone });
+                    
+                    if (!user) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ You're not registered! Please use *${config.PREFIX}register* to create an account.`
+                        });
+                        return;
+                    }
+
+                    const transactions = await dbOps.findTransactions({ 
+                        $or: [
+                            { sender: normalizedPhone },
+                            { receiver: normalizedPhone }
+                        ]
+                    }, 5);
+
+                    if (transactions.length === 0) {
+                        await socket.sendMessage(sender, {
+                            text: `📋 *Transaction History*\n\nNo transactions found.`
+                        });
+                        return;
+                    }
+
+                    let historyText = `📋 *Transaction History*\n\n`;
+                    transactions.forEach((tx, index) => {
+                        const date = moment(tx.createdAt).format('DD/MM/YY HH:mm');
+                        const amount = formatCurrency(tx.amount);
+                        const type = tx.type === 'deposit' ? '📥 Deposit' : 
+                                    tx.type === 'withdrawal' ? '📤 Withdrawal' : 
+                                    tx.type === 'transfer' ? '🔄 Transfer' : '💸 Transaction';
+                        
+                        const status = tx.status === 'completed' ? '✅' : 
+                                     tx.status === 'pending' ? '🔄' : '❌';
+                        
+                        historyText += `${index + 1}. ${type} ${status}\n`;
+                        historyText += `   Amount: ${amount}\n`;
+                        historyText += `   Date: ${date}\n`;
+                        if (tx.reference) historyText += `   Ref: ${tx.reference}\n`;
+                        historyText += `\n`;
+                    });
+
+                    await socket.sendMessage(sender, { text: historyText });
+                    break;
+                }
+
+                case 'profile': {
+                    const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
+                    const user = await dbOps.findUser({ phone: normalizedPhone });
+                    
+                    if (!user) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ You're not registered! Please use *${config.PREFIX}register* to create an account.`
+                        });
+                        return;
+                    }
+
+                    const profileText = `👤 *Profile Information*\n\n` +
+                                      `Name: ${user.name}\n` +
+                                      `Phone: ${user.phone}\n` +
+                                      `Balance: ${formatCurrency(user.balance)}\n` +
+                                      `Registered: ${moment(user.createdAt).format('DD/MM/YYYY')}\n` +
+                                      `Last Active: ${moment(user.updatedAt).format('DD/MM/YYYY HH:mm')}\n\n` +
+                                      `Account Status: ✅ Active`;
+
+                    await socket.sendMessage(sender, { text: profileText });
+                    break;
+                }
+
+                case 'help': {
+                    const helpText = `ℹ️ *BeraPay Help*\n\n` +
+                                   `*Commands:*\n` +
+                                   `• ${config.PREFIX}menu - Main menu\n` +
+                                   `• ${config.PREFIX}register - Create account\n` +
+                                   `• ${config.PREFIX}login - Login to account\n` +
+                                   `• ${config.PREFIX}balance - Check balance\n` +
+                                   `• ${config.PREFIX}deposit - Add funds\n` +
+                                   `• ${config.PREFIX}withdraw - Withdraw funds\n` +
+                                   `• ${config.PREFIX}history - Transaction history\n` +
+                                   `• ${config.PREFIX}profile - View profile\n\n` +
+                                   `*Support:*\n` +
+                                   `For issues, contact: ${config.OWNER_NUMBER}`;
+
+                    await socket.sendMessage(sender, { text: helpText });
+                    break;
+                }
+
+                case 'support': {
+                    await socket.sendMessage(sender, {
+                        text: `📞 *Support*\n\nFor assistance, please contact:\n\nPhone: ${config.OWNER_NUMBER}\n\nWe're here to help you 24/7!`
+                    });
+                    break;
+                }
+
+                // Quick deposit amounts
+                case '100':
+                case '500':
+                case '1000': {
+                    const amount = parseInt(command);
+                    await handleQuickDeposit(socket, sender, amount);
+                    break;
+                }
+
+                // Quick withdrawal amounts  
+                case 'withdraw_100':
+                case 'withdraw_500':
+                case 'withdraw_1000': {
+                    const amount = parseInt(command.split('_')[1]);
+                    await handleQuickWithdraw(socket, sender, amount);
                     break;
                 }
 
@@ -1078,513 +1532,14 @@ async function setupCommandHandlers(socket, number) {
                     break;
                 }
 
-                case 'balance': {
-                    try {
-                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                        const user = await dbOps.findUser({ phone: normalizedPhone });
-                        
-                        if (!user) {
-                            await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
-                            });
-                            return;
-                        }
-                        
-                        await socket.sendMessage(sender, {
-                            text: `💰 *Your Wallet Balance*\n\nBalance: *${formatCurrency(user.balance)}*\n\nAccount: ${user.name}\nPhone: ${user.phone}\n\nLast updated: ${new Date(user.updatedAt).toLocaleString()}`
-                        });
-                    } catch (error) {
-                        console.error('Balance check error:', error);
-                        await socket.sendMessage(sender, {
-                            text: `❌ Failed to check balance. Please try again.`
-                        });
-                    }
-                    break;
-                }
-
-                case 'deposit': {
-                    try {
-                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                        const user = await dbOps.findUser({ phone: normalizedPhone });
-                        
-                        if (!user) {
-                            await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
-                            });
-                            return;
-                        }
-                        
-                        const amount = parseInt(args[0]);
-                        if (!amount || amount < 1) {
-                            await socket.sendMessage(sender, {
-                                text: `📌 *Usage:* ${config.PREFIX}deposit <amount>\n\nExample: ${config.PREFIX}deposit 1000\n\n💡 Minimum: KES 10\n💡 Maximum: KES 50,000`
-                            });
-                            return;
-                        }
-
-                        if (amount < 10) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Minimum deposit amount is KES 10`
-                            });
-                            return;
-                        }
-
-                        if (amount > 50000) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Maximum deposit amount is KES 50,000`
-                            });
-                            return;
-                        }
-
-                        const reference = generateTransactionReference();
-                        
-                        await socket.sendMessage(sender, {
-                            text: `🔄 *Initiating STK Push...*\n\nAmount: ${formatCurrency(amount)}\nPlease wait...`
-                        });
-
-                        const stkResult = await initiateSTKPush(normalizedPhone, amount, reference);
-                        
-                        if (stkResult.success) {
-                            const transaction = {
-                                sender: normalizedPhone,
-                                receiver: 'SYSTEM',
-                                amount: amount,
-                                type: 'deposit',
-                                status: 'pending',
-                                reference: reference,
-                                checkoutRequestId: stkResult.checkoutRequestId,
-                                createdAt: new Date(),
-                                updatedAt: new Date()
-                            };
-                            
-                            await dbOps.insertTransaction(transaction);
-                            pendingTransactions.set(reference, { socket, sender, phone: normalizedPhone, amount, type: 'deposit' });
-                            
-                            await socket.sendMessage(sender, {
-                                text: `📲 *STK Push Sent!*\n\nPlease check your phone to complete payment of ${formatCurrency(amount)}.\n\nReference: ${reference}\n\nYou will receive a confirmation message once payment is successful.`
-                            });
-                            
-                        } else {
-                            await socket.sendMessage(sender, {
-                                text: `❌ *STK Push Failed!*\n\nError: ${stkResult.error}\n\nPlease try again later.`
-                            });
-                        }
-                        
-                    } catch (error) {
-                        console.error('Deposit command error:', error);
-                        await socket.sendMessage(sender, {
-                            text: `❌ Failed to process deposit. Please try again.`
-                        });
-                    }
-                    break;
-                }
-
-                case 'withdraw': {
-                    try {
-                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                        const user = await dbOps.findUser({ phone: normalizedPhone });
-                        
-                        if (!user) {
-                            await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
-                            });
-                            return;
-                        }
-
-                        const amount = parseInt(args[0]);
-                        if (!amount || amount < 1) {
-                            await socket.sendMessage(sender, {
-                                text: `📌 *Usage:* ${config.PREFIX}withdraw <amount>\n\nExample: ${config.PREFIX}withdraw 500\n\n💡 Minimum: KES 10\n💡 Maximum: KES 50,000`
-                            });
-                            return;
-                        }
-
-                        if (amount < 10) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Minimum withdrawal amount is KES 10`
-                            });
-                            return;
-                        }
-
-                        if (amount > user.balance) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Insufficient balance! You have ${formatCurrency(user.balance)}`
-                            });
-                            return;
-                        }
-
-                        if (amount > 50000) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Maximum withdrawal amount is KES 50,000`
-                            });
-                            return;
-                        }
-
-                        transactionState.set(sender, { type: 'withdraw', step: 1, amount: amount });
-                        
-                        await socket.sendMessage(sender, {
-                            text: `📤 *Withdrawal - Step 1/2*\n\nAmount: ${formatCurrency(amount)}\n\nPlease enter your 4-digit PIN to continue:`
-                        });
-                        
-                    } catch (error) {
-                        console.error('Withdraw command error:', error);
-                        await socket.sendMessage(sender, {
-                            text: `❌ Failed to process withdrawal. Please try again.`
-                        });
-                    }
-                    break;
-                }
-
-                case 'send': {
-                    try {
-                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                        const user = await dbOps.findUser({ phone: normalizedPhone });
-                        
-                        if (!user) {
-                            await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
-                            });
-                            return;
-                        }
-                        
-                        // Parse send command: "send 500 to 0712345678"
-                        const match = body.match(/send\s+(\d+)\s+to\s+(\d+)/i);
-                        if (!match) {
-                            await socket.sendMessage(sender, {
-                                text: `📌 *Usage:* ${config.PREFIX}send <amount> to <phone number>\n\nExample: ${config.PREFIX}send 500 to 0712345678\n\n💡 The recipient will receive money via M-PESA`
-                            });
-                            return;
-                        }
-                        
-                        const amount = parseInt(match[1]);
-                        let recipient = match[2].replace(/[^0-9]/g, '');
-                        
-                        // Normalize recipient phone
-                        if (recipient.startsWith('0')) {
-                            recipient = '254' + recipient.substring(1);
-                        }
-                        if (recipient.startsWith('7') && recipient.length === 9) {
-                            recipient = '254' + recipient;
-                        }
-                        
-                        // Validate amount
-                        if (amount < 1) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Amount must be at least KES 1`
-                            });
-                            return;
-                        }
-                        
-                        if (amount > user.balance) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ Insufficient balance! You have ${formatCurrency(user.balance)}`
-                            });
-                            return;
-                        }
-                        
-                        // Prevent sending to self
-                        if (recipient === normalizedPhone) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ You cannot send money to yourself`
-                            });
-                            return;
-                        }
-
-                        // Check if recipient is registered (optional - for internal transfers)
-                        const recipientUser = await dbOps.findUser({ phone: recipient });
-                        
-                        const tempTransaction = {
-                            sender: normalizedPhone,
-                            recipient: recipient,
-                            amount: amount,
-                            recipientRegistered: !!recipientUser,
-                            timestamp: Date.now()
-                        };
-                        
-                        transactionState.set(sender + '_send', tempTransaction);
-                        
-                        const recipientInfo = recipientUser ? 
-                            `Registered user: ${recipientUser.name}` : 
-                            `External number: Will use M-PESA transfer`;
-                        
-                        await socket.sendMessage(sender, {
-                            text: `💸 *Confirm Send Money*\n\nYou are about to send ${formatCurrency(amount)} to ${recipient}\n\n${recipientInfo}\n\nPlease confirm:`,
-                            buttons: [
-                                {
-                                    buttonId: `${config.PREFIX}confirm_send`,
-                                    buttonText: { displayText: '✅ Confirm Send' },
-                                    type: 1
-                                },
-                                {
-                                    buttonId: `${config.PREFIX}cancel_send`,
-                                    buttonText: { displayText: '❌ Cancel' },
-                                    type: 1
-                                }
-                            ]
-                        });
-                        
-                    } catch (error) {
-                        console.error('Send command error:', error);
-                        await socket.sendMessage(sender, {
-                            text: `❌ Failed to process send request. Please try again.`
-                        });
-                    }
-                    break;
-                }
-
-                case 'confirm_send': {
-                    try {
-                        const tempTransaction = transactionState.get(sender + '_send');
-                        if (!tempTransaction) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ No pending transaction found`
-                            });
-                            return;
-                        }
-                        
-                        const { sender: senderPhone, recipient, amount, recipientRegistered } = tempTransaction;
-                        const reference = generateTransactionReference();
-                        
-                        await socket.sendMessage(sender, {
-                            text: `🔄 *Processing Transaction...*\n\nSending ${formatCurrency(amount)} to ${recipient}\nPlease wait...`
-                        });
-
-                        let transactionStatus = 'pending';
-                        let transactionError = null;
-                        let transactionId = null;
-
-                        // Always use PayHero for sending money (more reliable)
-                        const sendResult = await initiateSendMoney(senderPhone, recipient, amount, reference);
-                        
-                        if (sendResult.success) {
-                            await dbOps.updateUserBalance(senderPhone, -amount);
-                            transactionStatus = 'completed';
-                            transactionId = sendResult.transactionId;
-                            
-                            // Notify recipient if they are registered and online
-                            if (recipientRegistered) {
-                                const recipientJid = `${recipient}@s.whatsapp.net`;
-                                const recipientSocket = activeSockets.get(recipient);
-                                if (recipientSocket) {
-                                    const recipientUser = await dbOps.findUser({ phone: recipient });
-                                    await recipientSocket.sendMessage(recipientJid, {
-                                        text: `💰 *Money Received!*\n\nYou received ${formatCurrency(amount)} from ${senderPhone}\n\nNew balance: ${formatCurrency(recipientUser.balance + amount)}`
-                                    });
-                                }
-                            }
-                            
-                        } else {
-                            transactionStatus = 'failed';
-                            transactionError = sendResult.error;
-                        }
-                        
-                        // Save transaction record
-                        const transaction = {
-                            sender: senderPhone,
-                            receiver: recipient,
-                            amount: amount,
-                            type: 'send',
-                            status: transactionStatus,
-                            reference: reference,
-                            transactionId: transactionId,
-                            recipientRegistered: recipientRegistered,
-                            error: transactionError,
-                            createdAt: new Date(),
-                            updatedAt: new Date()
-                        };
-                        
-                        await dbOps.insertTransaction(transaction);
-                        transactionState.delete(sender + '_send');
-                        
-                        if (transactionStatus === 'completed') {
-                            const updatedUser = await dbOps.findUser({ phone: senderPhone });
-                            await socket.sendMessage(sender, {
-                                text: `✅ *Transaction Successful!*\n\nSent ${formatCurrency(amount)} to ${recipient}\n\nNew balance: ${formatCurrency(updatedUser.balance)}\nReference: ${reference}`
-                            });
-                        } else {
-                            await socket.sendMessage(sender, {
-                                text: `❌ *Transaction Failed*\n\nFailed to send ${formatCurrency(amount)} to ${recipient}\nError: ${transactionError}\n\nYour balance has not been deducted.`
-                            });
-                        }
-                    } catch (error) {
-                        console.error('Confirm send error:', error);
-                        await socket.sendMessage(sender, {
-                            text: `❌ Transaction failed. Please try again.`
-                        });
-                    }
-                    break;
-                }
-
-                case 'cancel_send': {
-                    transactionState.delete(sender + '_send');
-                    await socket.sendMessage(sender, {
-                        text: `❌ Transaction cancelled.`
-                    });
-                    break;
-                }
-
-                case 'transactions':
-                case 'history': {
-                    try {
-                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                        const user = await dbOps.findUser({ phone: normalizedPhone });
-                        
-                        if (!user) {
-                            await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
-                            });
-                            return;
-                        }
-                        
-                        const transactions = await dbOps.findTransactions({
-                            $or: [
-                                { sender: normalizedPhone },
-                                { receiver: normalizedPhone }
-                            ]
-                        }, 10);
-                        
-                        if (transactions.length === 0) {
-                            await socket.sendMessage(sender, {
-                                text: `📜 *Transaction History*\n\nNo transactions found.\n\nStart by depositing or sending money.`
-                            });
-                            return;
-                        }
-                        
-                        let transactionText = `📜 *Recent Transactions*\n\n`;
-                        
-                        transactions.forEach((tx, index) => {
-                            const type = tx.sender === normalizedPhone ? 'Sent' : 'Received';
-                            const amount = formatCurrency(tx.amount);
-                            const counterparty = tx.sender === normalizedPhone ? tx.receiver : tx.sender;
-                            const date = new Date(tx.createdAt).toLocaleDateString();
-                            const status = tx.status === 'completed' ? '✅' : tx.status === 'pending' ? '🔄' : '❌';
-                            const time = new Date(tx.createdAt).toLocaleTimeString();
-                            
-                            transactionText += `${index + 1}. ${type} ${amount}\n`;
-                            transactionText += `   To: ${counterparty}\n`;
-                            transactionText += `   ${status} ${tx.status} • ${date} ${time}\n\n`;
-                        });
-                        
-                        transactionText += `_Showing latest ${transactions.length} transactions_`;
-                        
-                        await socket.sendMessage(sender, {
-                            text: transactionText
-                        });
-                    } catch (error) {
-                        console.error('Transactions command error:', error);
-                        await socket.sendMessage(sender, {
-                            text: `❌ Failed to fetch transactions. Please try again.`
-                        });
-                    }
-                    break;
-                }
-
-                case 'profile': {
-                    try {
-                        const normalizedPhone = sender.replace('@s.whatsapp.net', '').replace(/^0/, '254');
-                        const user = await dbOps.findUser({ phone: normalizedPhone });
-                        
-                        if (!user) {
-                            await socket.sendMessage(sender, {
-                                text: `⚠️ *You are not registered yet!*\n\nType *${config.PREFIX}register* to create your BeraPay account.`
-                            });
-                            return;
-                        }
-                        
-                        const profileText = `👤 *Your Profile*\n\n` +
-                                          `📝 Name: ${user.name}\n` +
-                                          `📱 Phone: ${user.phone}\n` +
-                                          `💰 Balance: ${formatCurrency(user.balance)}\n` +
-                                          `📅 Registered: ${new Date(user.createdAt).toLocaleDateString()}\n` +
-                                          `🆔 User ID: ${user._id}`;
-                        
-                        if (user.profilePath && fs.existsSync(user.profilePath)) {
-                            await socket.sendMessage(sender, {
-                                image: fs.readFileSync(user.profilePath),
-                                caption: profileText
-                            });
-                        } else {
-                            await socket.sendMessage(sender, {
-                                text: profileText
-                            });
-                        }
-                    } catch (error) {
-                        console.error('Profile command error:', error);
-                        await socket.sendMessage(sender, {
-                            text: `❌ Failed to load profile. Please try again.`
-                        });
-                    }
-                    break;
-                }
-
-                case 'help': {
-                    const helpText = `🧭 *BeraPay Commands*\n\n` +
-                                   `🎯 *${config.PREFIX}menu* - Show interactive menu\n` +
-                                   `📝 *${config.PREFIX}register* - Create your BeraPay account\n` +
-                                   `🔐 *${config.PREFIX}login* - Login to your account\n` +
-                                   `💰 *${config.PREFIX}balance* - Check your wallet balance\n` +
-                                   `💸 *${config.PREFIX}send <amount> to <number>* - Send money to others\n` +
-                                   `📥 *${config.PREFIX}deposit <amount>* - Add money via STK Push\n` +
-                                   `📤 *${config.PREFIX}withdraw <amount>* - Withdraw to M-PESA\n` +
-                                   `📜 *${config.PREFIX}transactions* - View transaction history\n` +
-                                   `👤 *${config.PREFIX}profile* - View your profile\n` +
-                                   `❓ *${config.PREFIX}help* - Show this help menu\n\n` +
-                                   `_💳 Real-time STK Push & Transfers_\n` +
-                                   `_🔒 Secure PIN-protected wallet_`;
-                    
-                    await socket.sendMessage(sender, {
-                        text: helpText
-                    });
-                    break;
-                }
-
-                case 'alive': {
-                    try {
-                        await socket.sendMessage(sender, { react: { text: '🔮', key: msg.key } });
-                        const startTime = socketCreationTime.get(number) || Date.now();
-                        const uptime = Math.floor((Date.now() - startTime) / 1000);
-                        const hours = Math.floor(uptime / 3600);
-                        const minutes = Math.floor((uptime % 3600) / 60);
-                        const seconds = Math.floor(uptime % 60);
-
-                        const captionText = `
-*┏───〘 *ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ* 〙───⊷*
-*┃* ᴜᴘᴛɪᴍᴇ: ${hours}h ${minutes}m ${seconds}s
-*┃* ᴀᴄᴛɪᴠᴇ ʙᴏᴛs: ${activeSockets.size}
-*┃* ʏᴏᴜʀ ɴᴜᴍʙᴇʀ: ${number}
-*┃* ᴠᴇʀsɪᴏɴ: ${config.version}
-*┃* ᴍᴇᴍᴏʀʏ ᴜsᴀɢᴇ: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB
-*┃* ᴅᴀᴛᴀʙᴀsᴇ: ${dbConnected ? '🟢 ᴍᴏɴɢᴏᴅʙ' : '🔴 ᴏꜰꜰʟɪɴᴇ'}
-*┃* ᴘᴀʏᴍᴇɴᴛs: ${validateConfig() ? '🟢 ʀᴇᴀʟ-ᴛɪᴍᴇ' : '🔴 ᴍɪssɪɴɢ ᴄʀᴇᴅs'}
-*┗──────────────⊷*
-
-> ʀᴇsᴘᴏɴᴅ ᴛɪᴍᴇ: ${Date.now() - msg.messageTimestamp * 1000}ms`;
-
-                        await socket.sendMessage(sender, {
-                            image: { url: config.RCD_IMAGE_PATH },
-                            caption: captionText,
-                            buttons: [
-                                {
-                                    buttonId: `${config.PREFIX}menu`,
-                                    buttonText: { displayText: '📂 ᴡᴀʟʟᴇᴛ ᴍᴇɴᴜ' },
-                                    type: 1
-                                },
-                                { buttonId: `${config.PREFIX}balance`, buttonText: { displayText: '💰 ʙᴀʟᴀɴᴄᴇ' }, type: 1 }
-                            ]
-                        });
-                    } catch (error) {
-                        console.error('Alive command error:', error);
-                    }
-                    break;
-                }
-
                 default:
+                    // Ignore unknown commands
                     break;
             }
         } catch (error) {
             console.error('Command handler error:', error);
             await socket.sendMessage(sender, {
-                text: `❌ An error occurred while processing your command. Please try again.`
+                text: `❌ An error occurred. Please try again later.`
             });
         }
     });
@@ -1819,7 +1774,8 @@ router.get('/active', (req, res) => {
     res.status(200).send({
         count: activeSockets.size,
         numbers: Array.from(activeSockets.keys()),
-        database: dbConnected ? 'connected' : 'disconnected'
+        database: dbConnected ? 'connected' : 'disconnected',
+        storage: usingMEGA ? 'MEGA' : 'Local'
     });
 });
 
@@ -1829,7 +1785,8 @@ router.get('/ping', (req, res) => {
         message: '👻 ʙᴇʀᴀᴘᴀʏ ᴡᴀʟʟᴇᴛ',
         activesession: activeSockets.size,
         database: dbConnected ? 'connected' : 'disconnected',
-        payhero: validateConfig() ? 'configured' : 'missing credentials'
+        payhero: validateConfig() ? 'configured' : 'missing credentials',
+        storage: usingMEGA ? 'MEGA' : 'Local'
     });
 });
 
